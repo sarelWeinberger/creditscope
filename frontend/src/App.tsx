@@ -10,7 +10,7 @@ function CustomersPage({ onSelect }: { onSelect: (c: Customer) => void }) {
   const [customers, setCustomers] = React.useState<Customer[]>([]);
   const [search, setSearch] = React.useState("");
   const [loading, setLoading] = React.useState(false);
-  const API = import.meta.env.VITE_API_URL || "http://localhost:8080/api";
+  const API = import.meta.env.VITE_API_URL || "/api";
 
   React.useEffect(() => {
     setLoading(true);

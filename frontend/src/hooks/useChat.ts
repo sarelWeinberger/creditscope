@@ -9,7 +9,9 @@ import {
   WebSocketEvent,
 } from "../types";
 
-const WS_URL = import.meta.env.VITE_WS_URL || "ws://localhost:8080/api/chat/ws";
+const WS_URL =
+  import.meta.env.VITE_WS_URL ||
+  `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.host}/api/chat/ws`;
 const RECONNECT_DELAY_MS = 2000;
 const MAX_RECONNECT_ATTEMPTS = 5;
 
