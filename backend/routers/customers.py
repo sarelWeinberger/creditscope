@@ -12,6 +12,7 @@ from backend.db.models import get_session
 from backend.db.queries import (
     get_customer_by_id,
     list_customers,
+    search_customers,
     get_customer_loans,
     get_customer_documents,
     add_customer_document,
@@ -28,16 +29,33 @@ router = APIRouter()
 
 
 @router.get("/customers", response_model=CustomerListResponse)
-async def list_all_customers(offset: int = 0, limit: int = 20, sort_by: str = "id"):
-    """List all customers with pagination."""
+async def list_all_customers(
+    page: int = 1,
+    page_size: int = 20,
+    sort_by: str = "id",
+    search: str | None = None,
+    search_type: str = "fuzzy",
+):
+    """List all customers with pagination (page/page_size based)."""
+    effective_page = max(page, 1)
+    effective_page_size = max(page_size, 1)
+    offset = (effective_page - 1) * effective_page_size
+
     session = get_session()
     try:
-        custs, total = list_customers(session, offset=offset, limit=limit, sort_by=sort_by)
+        if search:
+            matches = search_customers(session, search, search_type=search_type, limit=200)
+            total = len(matches)
+            custs = matches[offset: offset + effective_page_size]
+        else:
+            custs, total = list_customers(session, offset=offset, limit=effective_page_size, sort_by=sort_by)
+        total_pages = max(1, (total + effective_page_size - 1) // effective_page_size)
         return CustomerListResponse(
             customers=[CustomerResponse.model_validate(c) for c in custs],
             total=total,
-            offset=offset,
-            limit=limit,
+            page=effective_page,
+            page_size=effective_page_size,
+            total_pages=total_pages,
         )
     finally:
         session.close()

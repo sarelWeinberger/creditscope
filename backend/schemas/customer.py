@@ -53,8 +53,9 @@ class CustomerResponse(CustomerBase, CustomerCreditProfile):
 class CustomerListResponse(BaseModel):
     customers: list[CustomerResponse]
     total: int
-    offset: int
-    limit: int
+    page: int
+    page_size: int
+    total_pages: int
 
 
 class CustomerSearchRequest(BaseModel):

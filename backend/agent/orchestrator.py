@@ -12,30 +12,39 @@ Implements the main agent loop that:
 from __future__ import annotations
 
 import json
+import os
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Any
 
 import httpx
 import structlog
 
+from backend.agent.image_handler import ImageHandler
 from backend.agent.prompts import SYSTEM_PROMPT, TOOLS
 from backend.agent.tool_registry import ToolRegistry
-from backend.agent.image_handler import ImageHandler
 from backend.schemas.thinking import CoTConfig
 from inference.cot_controller import CoTController
-from inference.config import PORT as SGLANG_PORT
+from inference.moe_hooks import RequestTrace, get_collector
+from inference.observability import (
+    record_moe_trace,
+    record_request_tokens,
+    record_thinking_mode,
+    record_thinking_stats,
+    record_tool_call,
+    track_inference_latency,
+)
 
 logger = structlog.get_logger(__name__)
 
 MAX_STEPS = 8
-SGLANG_BASE_URL = f"http://localhost:{SGLANG_PORT}"
+SGLANG_BASE_URL = os.getenv("SGLANG_URL", "http://localhost:8000")
 
 
 @dataclass
 class AgentResponse:
     """Complete agent response with traces."""
+
     answer: str
     thinking: dict | None = None
     execution_trace: list[dict] = field(default_factory=list)
@@ -43,29 +52,33 @@ class AgentResponse:
     tokens: dict = field(default_factory=lambda: {"input": 0, "output": 0, "thinking": 0})
     session_id: str = ""
     request_id: str = ""
+    auto_budget: str | None = None
 
 
 class AdaptiveCoTStrategy:
-    """
-    Automatically adjusts thinking budget based on task complexity.
-
-    Rules:
-    1. Simple lookups → budget: "short" (512 tokens)
-    2. Single-factor analysis → budget: "standard" (2048 tokens)
-    3. Multi-factor scoring → budget: "extended" (8192 tokens)
-    4. Complex judgment calls → budget: "deep" (32768 tokens)
-    5. Image processing → budget: "standard" (2048 tokens)
-    """
+    """Automatically adjusts thinking budget based on task complexity."""
 
     SIMPLE_PATTERNS = ["what is", "look up", "find", "show me", "get", "list"]
     MEDIUM_PATTERNS = ["calculate", "ratio", "history", "analyze", "check"]
     COMPLEX_PATTERNS = [
-        "adjusted", "if we give", "mortgage", "compare",
-        "recommend", "should we", "evaluate", "assess",
+        "adjusted",
+        "if we give",
+        "mortgage",
+        "compare",
+        "recommend",
+        "should we",
+        "evaluate",
+        "assess",
     ]
     DEEP_PATTERNS = [
-        "edge case", "exception", "override", "complex",
-        "unusual", "restructure", "comprehensive", "full review",
+        "edge case",
+        "exception",
+        "override",
+        "complex",
+        "unusual",
+        "restructure",
+        "comprehensive",
+        "full review",
     ]
 
     def classify_complexity(self, query: str, has_images: bool = False) -> str:
@@ -74,22 +87,17 @@ class AdaptiveCoTStrategy:
             return "standard"
 
         query_lower = query.lower()
-        if any(p in query_lower for p in self.DEEP_PATTERNS):
+        if any(pattern in query_lower for pattern in self.DEEP_PATTERNS):
             return "deep"
-        if any(p in query_lower for p in self.COMPLEX_PATTERNS):
+        if any(pattern in query_lower for pattern in self.COMPLEX_PATTERNS):
             return "extended"
-        if any(p in query_lower for p in self.MEDIUM_PATTERNS):
+        if any(pattern in query_lower for pattern in self.MEDIUM_PATTERNS):
             return "standard"
         return "short"
 
 
 class CreditScopeAgent:
-    """
-    ReAct-style agent for credit analysis.
-
-    Processes banker queries through an iterative reasoning loop,
-    calling tools as needed and synthesizing credit assessments.
-    """
+    """ReAct-style agent for credit analysis."""
 
     def __init__(self):
         self.tool_registry = ToolRegistry()
@@ -97,9 +105,7 @@ class CreditScopeAgent:
         self.cot_controller = CoTController()
         self.adaptive_strategy = AdaptiveCoTStrategy()
         self.tool_schemas = TOOLS
-        self.system_prompt = SYSTEM_PROMPT.format(
-            tool_descriptions=json.dumps(TOOLS, indent=2)
-        )
+        self.system_prompt = SYSTEM_PROMPT.format(tool_descriptions=json.dumps(TOOLS, indent=2))
         self._client = httpx.AsyncClient(timeout=120.0)
 
     async def process_query(
@@ -109,31 +115,20 @@ class CreditScopeAgent:
         cot_config: CoTConfig | None = None,
         session_id: str | None = None,
     ) -> AgentResponse:
-        """
-        Main agent loop.
-
-        Args:
-            query: Natural language query from the banker
-            images: Optional list of image bytes for document processing
-            cot_config: Chain-of-Thought configuration
-            session_id: Session identifier for context continuity
-        """
+        """Run the main ReAct loop for a banker query."""
         request_id = str(uuid.uuid4())
         sid = session_id or str(uuid.uuid4())
 
-        # Resolve CoT config
         cot = cot_config or CoTConfig()
-        if cot.budget == "auto":
-            auto_budget = self.adaptive_strategy.classify_complexity(
-                query, has_images=bool(images)
-            )
-            cot = CoTConfig(mode=cot.mode, budget=auto_budget, visibility=cot.visibility)
+        auto_budget: str | None = None
+        if cot.auto or cot.budget == "auto":
+            auto_budget = self.adaptive_strategy.classify_complexity(query, has_images=bool(images))
+            cot = CoTConfig(mode=cot.mode, budget=auto_budget, visibility=cot.visibility, auto=True)
 
         request_params = self.cot_controller.build_request_params(cot.model_dump())
+        record_thinking_mode(cot.mode, str(cot.budget))
 
-        # Build initial messages
         messages = [{"role": "system", "content": self.system_prompt}]
-
         if images:
             image_data = await self.image_handler.process_images(images, context=query)
             content_parts: list[dict] = [{"type": "text", "text": query}]
@@ -141,10 +136,12 @@ class CreditScopeAgent:
                 if img["type"] == "image_url":
                     content_parts.append({"type": "image_url", "image_url": img["image_url"]})
                 elif img["type"] == "extracted_data":
-                    content_parts.append({
-                        "type": "text",
-                        "text": f"\n[Extracted document data: {json.dumps(img['data'])}]",
-                    })
+                    content_parts.append(
+                        {
+                            "type": "text",
+                            "text": f"\n[Extracted document data: {json.dumps(img['data'])}]",
+                        }
+                    )
             messages.append({"role": "user", "content": content_parts})
         else:
             messages.append({"role": "user", "content": query})
@@ -152,124 +149,246 @@ class CreditScopeAgent:
         execution_trace: list[dict] = []
         total_tokens = {"input": 0, "output": 0, "thinking": 0}
         thinking_data: dict | None = None
+        collector = get_collector()
 
-        # ReAct loop
         for step in range(MAX_STEPS):
-            start_time = time.time()
+            started_at = time.time()
+            response = await self._call_model(messages, request_params, request_id=request_id)
+            duration_ms = (time.time() - started_at) * 1000
 
-            response = await self._call_model(messages, request_params)
-            duration_ms = (time.time() - start_time) * 1000
-
-            # Track tokens
             usage = response.get("usage", {})
             total_tokens["input"] += usage.get("prompt_tokens", 0)
             total_tokens["output"] += usage.get("completion_tokens", 0)
 
-            # Extract thinking content
             choice = response.get("choices", [{}])[0]
             message = choice.get("message", {})
-            reasoning = message.get("reasoning_content")
-            if reasoning and thinking_data is None:
-                thinking_data = {
-                    "content": reasoning if cot.visibility != "hidden" else None,
-                    "tokens_used": len(reasoning.split()) if reasoning else 0,
-                    "budget": request_params.get("_thinking_budget", 2048),
-                    "budget_utilization_pct": 0.0,
-                    "was_budget_enforced": False,
-                    "duration_ms": duration_ms,
-                }
+            latest_trace = collector.get_latest_trace(request_id=request_id)
 
-            # Check for tool calls
+            current_thinking = self._build_thinking_trace(
+                reasoning=message.get("reasoning_content"),
+                duration_ms=duration_ms,
+                request_params=request_params,
+                visibility=cot.visibility,
+                trace=latest_trace,
+            )
+            if current_thinking:
+                thinking_data = current_thinking
+                total_tokens["thinking"] = current_thinking.get("tokens_used", 0)
+
             tool_calls = message.get("tool_calls", [])
-
-            if tool_calls:
-                messages.append(message)
-                for tc in tool_calls:
-                    func = tc.get("function", {})
-                    tool_name = func.get("name", "")
-                    try:
-                        tool_args = json.loads(func.get("arguments", "{}"))
-                    except json.JSONDecodeError:
-                        tool_args = {}
-
-                    tool_start = time.time()
-                    result = await self.tool_registry.execute(tool_name, tool_args)
-                    tool_duration = (time.time() - tool_start) * 1000
-
-                    trace_entry = {
-                        "step": step,
-                        "tool": tool_name,
-                        "input": tool_args,
-                        "output": result,
-                        "duration_ms": round(tool_duration, 1),
-                    }
-                    execution_trace.append(trace_entry)
-
-                    messages.append({
-                        "role": "tool",
-                        "tool_call_id": tc.get("id", ""),
-                        "content": json.dumps(result) if isinstance(result, dict) else str(result),
-                    })
-            else:
-                # Final response — no more tool calls
-                answer = message.get("content", "")
+            if not tool_calls:
+                if thinking_data:
+                    self._record_thinking(request_id, thinking_data)
+                record_request_tokens(
+                    input_tokens=total_tokens["input"],
+                    output_tokens=total_tokens["output"],
+                    thinking_tokens=total_tokens["thinking"],
+                )
                 return AgentResponse(
-                    answer=answer,
+                    answer=message.get("content", ""),
                     thinking=thinking_data,
                     execution_trace=execution_trace,
-                    moe_traces=None,
+                    moe_traces=self._serialize_moe_trace(latest_trace),
                     tokens=total_tokens,
                     session_id=sid,
                     request_id=request_id,
+                    auto_budget=auto_budget,
                 )
 
+            messages.append(message)
+            for tc in tool_calls:
+                func = tc.get("function", {})
+                tool_name = func.get("name", "")
+                try:
+                    tool_args = json.loads(func.get("arguments", "{}"))
+                except json.JSONDecodeError:
+                    tool_args = {}
+
+                tool_started_at = time.time()
+                result = await self.tool_registry.execute(tool_name, tool_args)
+                tool_duration = (time.time() - tool_started_at) * 1000
+                record_tool_call(tool_name)
+
+                execution_trace.append(
+                    {
+                        "step": step,
+                        "tool": tool_name,
+                        "tool_name": tool_name,
+                        "input": tool_args,
+                        "tool_input": tool_args,
+                        "output": result,
+                        "tool_output": result,
+                        "duration_ms": round(tool_duration, 1),
+                        "success": "error" not in result,
+                        "thinking_stats": current_thinking,
+                    }
+                )
+
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tc.get("id", ""),
+                        "content": json.dumps(result),
+                    }
+                )
+
+        if thinking_data:
+            self._record_thinking(request_id, thinking_data)
+        record_request_tokens(
+            input_tokens=total_tokens["input"],
+            output_tokens=total_tokens["output"],
+            thinking_tokens=total_tokens["thinking"],
+        )
         return AgentResponse(
-            answer="I've reached my maximum reasoning steps. Here's what I found so far based on the tools I called.",
+            answer="Max reasoning steps reached.",
             thinking=thinking_data,
             execution_trace=execution_trace,
+            moe_traces=self._serialize_moe_trace(collector.get_latest_trace(request_id=request_id)),
             tokens=total_tokens,
             session_id=sid,
             request_id=request_id,
+            auto_budget=auto_budget,
         )
 
-    async def _call_model(self, messages: list[dict], params: dict) -> dict:
+    async def _call_model(self, messages: list[dict], params: dict, request_id: str) -> dict:
         """Call the SGLang inference server."""
         payload = {
             "model": "default",
             "messages": messages,
             "tools": self.tool_schemas,
             "tool_choice": "auto",
-            "max_tokens": 4096,
+            "max_tokens": 2048,
             "stream": False,
         }
-
-        # Add sampling params
         for key in ("temperature", "top_p", "top_k", "min_p"):
             if key in params:
                 payload[key] = params[key]
-
-        # Add chat template kwargs
         if "chat_template_kwargs" in params:
             payload["chat_template_kwargs"] = params["chat_template_kwargs"]
+        if "_thinking_budget" in params:
+            payload["_thinking_budget"] = params["_thinking_budget"]
+        if "_thinking_visibility" in params:
+            payload["_thinking_visibility"] = params["_thinking_visibility"]
 
+        collector = get_collector()
+        collector.begin_trace(
+            request_id=request_id,
+            phase="thinking" if params.get("chat_template_kwargs", {}).get("enable_thinking", True) else "response",
+        )
         try:
-            resp = await self._client.post(
-                f"{SGLANG_BASE_URL}/v1/chat/completions",
-                json=payload,
-            )
+            with track_inference_latency():
+                resp = await self._client.post(f"{SGLANG_BASE_URL}/v1/chat/completions", json=payload)
             resp.raise_for_status()
-            return resp.json()
-        except Exception as e:
-            logger.error("model_call_failed", error=str(e))
+            result = resp.json()
+            trace = collector.end_trace()
+            if trace:
+                record_moe_trace(trace)
+            return result
+        except Exception as exc:
+            collector.end_trace()
+            logger.error("model_call_failed", error=str(exc))
             return {
-                "choices": [{
-                    "message": {
-                        "content": f"I encountered an error communicating with the model: {e}",
+                "choices": [
+                    {
+                        "message": {
+                            "content": f"I encountered an error communicating with the model: {exc}",
+                        }
                     }
-                }],
+                ],
                 "usage": {},
             }
 
-    async def close(self):
+    def _build_thinking_trace(
+        self,
+        reasoning: str | None,
+        duration_ms: float,
+        request_params: dict,
+        visibility: str,
+        trace: RequestTrace | None,
+    ) -> dict | None:
+        if reasoning is None and request_params.get("chat_template_kwargs", {}).get("enable_thinking") is False:
+            return {
+                "content": None,
+                "tokens_used": 0,
+                "budget": 0,
+                "budget_utilization_pct": 0.0,
+                "was_budget_enforced": False,
+                "duration_ms": round(duration_ms, 1),
+                "phase_moe_comparison": self._compare_moe_phases(trace),
+            }
+        if reasoning is None:
+            return None
+
+        tokens_used = len(reasoning.split())
+        budget = request_params.get("_thinking_budget", 2048)
+        utilization = round(tokens_used / budget * 100, 1) if isinstance(budget, int) and budget > 0 else None
+        was_enforced = bool(isinstance(budget, int) and budget > 0 and tokens_used >= budget)
+        return {
+            "content": reasoning if visibility != "hidden" else None,
+            "tokens_used": tokens_used,
+            "budget": budget,
+            "budget_utilization_pct": utilization,
+            "was_budget_enforced": was_enforced,
+            "duration_ms": round(duration_ms, 1),
+            "phase_moe_comparison": self._compare_moe_phases(trace),
+        }
+
+    def _compare_moe_phases(self, trace: RequestTrace | None) -> dict | None:
+        if trace is None or not trace.layer_traces:
+            return None
+        experts = sorted({expert_id for layer in trace.layer_traces for expert_id in layer.expert_load})
+        return {
+            "thinking_phase_experts": experts,
+            "response_phase_experts": experts,
+            "expert_overlap_pct": 100.0 if experts else 0.0,
+        }
+
+    def _serialize_moe_trace(self, trace: RequestTrace | None) -> dict | None:
+        if trace is None:
+            return None
+        comparison = self._compare_moe_phases(trace) or {}
+        return {
+            "request_id": trace.request_id,
+            "timestamp": trace.timestamp,
+            "layers": [
+                {
+                    "layer_id": layer.layer_name,
+                    "experts_activated": sorted(layer.expert_load.keys()),
+                    "gating_weights": layer.gating_weights.tolist() if hasattr(layer.gating_weights, "tolist") else [],
+                    "entropy": layer.entropy,
+                    "num_tokens": layer.num_tokens,
+                }
+                for layer in trace.layer_traces
+            ],
+            "thinking_phase_experts": comparison.get("thinking_phase_experts", []),
+            "response_phase_experts": comparison.get("response_phase_experts", []),
+            "total_tokens": trace.total_tokens,
+        }
+
+    def _record_thinking(self, request_id: str, thinking_data: dict) -> None:
+        record_thinking_stats(
+            {
+                "thinking_tokens_used": thinking_data.get("tokens_used", 0),
+                "budget_utilization_pct": thinking_data.get("budget_utilization_pct"),
+                "was_budget_enforced": thinking_data.get("was_budget_enforced", False),
+                "duration_ms": thinking_data.get("duration_ms"),
+            }
+        )
+        from backend.routers.thinking import record_request_stats
+
+        record_request_stats(
+            request_id,
+            {
+                "request_id": request_id,
+                "thinking_tokens_used": thinking_data.get("tokens_used", 0),
+                "thinking_budget": thinking_data.get("budget", 0),
+                "budget_utilization_pct": thinking_data.get("budget_utilization_pct"),
+                "was_budget_enforced": thinking_data.get("was_budget_enforced", False),
+                "thinking_duration_ms": thinking_data.get("duration_ms", 0.0),
+                "phase_moe_comparison": thinking_data.get("phase_moe_comparison"),
+            },
+        )
+
+    async def close(self) -> None:
         """Cleanup resources."""
         await self._client.aclose()

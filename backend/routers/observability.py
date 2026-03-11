@@ -2,6 +2,11 @@
 MoE observability API endpoints.
 """
 
+from __future__ import annotations
+
+import os
+
+import httpx
 from fastapi import APIRouter
 from fastapi.responses import Response
 
@@ -9,11 +14,38 @@ from inference.moe_hooks import get_collector
 from inference.observability import get_metrics
 
 router = APIRouter()
+INFERENCE_BASE_URL = os.getenv("SGLANG_URL", "http://localhost:8000")
+
+
+async def _try_inference_json(path: str, params: dict | None = None) -> dict | list | None:
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(f"{INFERENCE_BASE_URL}{path}", params=params)
+            if response.status_code == 200:
+                return response.json()
+    except Exception:
+        return None
+    return None
+
+
+async def _try_inference_metrics() -> bytes | None:
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(f"{INFERENCE_BASE_URL}/metrics")
+            if response.status_code == 200:
+                return response.content
+    except Exception:
+        return None
+    return None
 
 
 @router.get("/observability/moe/latest")
 async def get_latest_moe_trace():
     """Get the latest MoE trace data."""
+    proxied = await _try_inference_json("/moe_trace")
+    if proxied is not None:
+        return proxied
+
     collector = get_collector()
     trace = collector.get_latest_trace()
     if not trace:
@@ -41,6 +73,10 @@ async def get_latest_moe_trace():
 @router.get("/observability/moe/heatmap")
 async def get_expert_heatmap(num_requests: int = 50):
     """Get aggregated expert activation heatmap data."""
+    proxied = await _try_inference_json("/moe_trace/heatmap", params={"num_requests": num_requests})
+    if proxied is not None:
+        return proxied
+
     collector = get_collector()
     return collector.get_expert_heatmap(num_requests)
 
@@ -48,6 +84,10 @@ async def get_expert_heatmap(num_requests: int = 50):
 @router.get("/observability/moe/entropy")
 async def get_entropy_timeseries(num_requests: int = 50):
     """Get router entropy time series data."""
+    proxied = await _try_inference_json("/moe_trace/entropy", params={"num_requests": num_requests})
+    if proxied is not None:
+        return proxied
+
     collector = get_collector()
     return collector.get_entropy_timeseries(num_requests)
 
@@ -55,6 +95,10 @@ async def get_entropy_timeseries(num_requests: int = 50):
 @router.get("/observability/metrics")
 async def get_prometheus_metrics():
     """Get Prometheus-format metrics."""
+    proxied = await _try_inference_metrics()
+    if proxied is not None:
+        return Response(content=proxied, media_type="text/plain; charset=utf-8")
+
     metrics = get_metrics()
     return Response(content=metrics, media_type="text/plain; charset=utf-8")
 
@@ -62,6 +106,10 @@ async def get_prometheus_metrics():
 @router.get("/observability/layers")
 async def get_layer_activations():
     """Get per-layer activation data."""
+    proxied = await _try_inference_json("/moe_trace/layers")
+    if isinstance(proxied, dict) and "layers" in proxied:
+        return proxied["layers"]
+
     collector = get_collector()
     layer_map = collector.get_layer_map()
 

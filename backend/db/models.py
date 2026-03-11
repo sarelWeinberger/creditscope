@@ -2,6 +2,7 @@
 SQLAlchemy ORM models for CreditScope customer database.
 """
 
+import os
 from datetime import date, datetime
 from typing import Optional
 
@@ -101,13 +102,18 @@ class CustomerDocument(Base):
 
 
 # Database setup
-DATABASE_URL = "sqlite:///./creditscope.db"
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./data/creditscope.db")
 
 engine = create_engine(DATABASE_URL, echo=False)
 
 
 def init_db():
     """Create all tables."""
+    if DATABASE_URL.startswith("sqlite:///"):
+        db_path = DATABASE_URL.replace("sqlite:///", "", 1)
+        db_dir = os.path.dirname(db_path)
+        if db_dir:
+            os.makedirs(db_dir, exist_ok=True)
     Base.metadata.create_all(engine)
 
 
