@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//tmp/**)",
+      "Bash(netstat -tlnp)",
+      "Read(//proc/311979/net/**)",
+      "Read(//home/ubuntu/creditscope/**)"
+    ]
+  }
+}
