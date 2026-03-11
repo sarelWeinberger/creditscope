@@ -7,10 +7,11 @@ from __future__ import annotations
 import json
 import uuid
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect, status
 from pydantic import BaseModel
 
 from backend.agent.orchestrator import CreditScopeAgent
+from backend.auth import require_authenticated_request, require_authenticated_websocket
 from backend.schemas.thinking import CoTConfig
 
 router = APIRouter()
@@ -54,7 +55,10 @@ class ChatResponse(BaseModel):
 
 
 @router.post("/chat", response_model=ChatResponse)
-async def chat_endpoint(request: ChatRequest):
+async def chat_endpoint(
+    request: ChatRequest,
+    _authenticated_email: str = Depends(require_authenticated_request),
+):
     """Process a chat message through the agent."""
     agent = get_agent()
 
@@ -90,6 +94,12 @@ async def chat_endpoint(request: ChatRequest):
 @router.websocket("/chat/ws")
 async def chat_websocket(websocket: WebSocket):
     """WebSocket endpoint for streaming chat responses."""
+    try:
+        require_authenticated_websocket(websocket)
+    except Exception:
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        return
+
     await websocket.accept()
     agent = get_agent()
     session_id = str(uuid.uuid4())

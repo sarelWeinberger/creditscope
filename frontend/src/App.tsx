@@ -1,8 +1,11 @@
-import React, { useState } from "react";
+import React, { useCallback, useEffect, useState } from "react";
 import { BrowserRouter, Route, Routes, Link, useLocation } from "react-router-dom";
 import ChatInterface from "./components/ChatInterface";
+import LoginScreen from "./components/LoginScreen";
 import ObservabilityDash from "./components/ObservabilityDash";
 import { Customer, CoTConfig, ThinkingMode, ThinkingVisibility } from "./types";
+
+const API_BASE = import.meta.env.VITE_API_URL || "/api";
 
 function toNumber(value: unknown, fallback = 0): number {
   return typeof value === "number" && Number.isFinite(value) ? value : fallback;
@@ -97,12 +100,11 @@ function CustomersPage({ onSelect }: { onSelect: (c: Customer) => void }) {
   const [customers, setCustomers] = React.useState<Customer[]>([]);
   const [search, setSearch] = React.useState("");
   const [loading, setLoading] = React.useState(false);
-  const API = import.meta.env.VITE_API_URL || "/api";
 
   React.useEffect(() => {
     setLoading(true);
     const params = search ? `?search=${encodeURIComponent(search)}&search_type=fuzzy` : "?page=1&page_size=30";
-    fetch(`${API}/customers${params}`)
+    fetch(`${API_BASE}/customers${params}`, { credentials: "include" })
       .then((r) => r.json())
       .then((d) => setCustomers((d.customers || []).map((customer: Record<string, unknown>) => normalizeCustomer(customer))))
       .catch(() => {})
@@ -227,7 +229,7 @@ function NavItem({ to, icon, label }: { to: string; icon: React.ReactNode; label
 
 // ─── Main App ─────────────────────────────────────────────────────────────────
 
-function AppLayout() {
+function AppLayout({ currentUser, onLogout }: { currentUser: string; onLogout: () => Promise<void> }) {
   const [selectedCustomer, setSelectedCustomer] = useState<Customer | null>(null);
 
   return (
@@ -244,6 +246,19 @@ function AppLayout() {
               <p className="text-white font-semibold text-sm">CreditScope</p>
               <p className="text-gray-500 text-xs">AI Credit Analysis</p>
             </div>
+          </div>
+          <div className="mt-4 rounded-lg border border-gray-800 bg-gray-950/80 px-3 py-2">
+            <p className="truncate text-xs text-gray-400">Signed in as</p>
+            <p className="truncate text-sm text-white">{currentUser}</p>
+            <button
+              type="button"
+              onClick={() => {
+                void onLogout();
+              }}
+              className="mt-2 text-xs font-medium text-blue-400 hover:text-blue-300"
+            >
+              Sign out
+            </button>
           </div>
         </div>
 
@@ -343,9 +358,94 @@ function AppLayout() {
 }
 
 export default function App() {
+  const [authStatus, setAuthStatus] = useState<"checking" | "authenticated" | "unauthenticated">("checking");
+  const [currentUser, setCurrentUser] = useState("");
+  const [authError, setAuthError] = useState<string | null>(null);
+  const [isAuthenticating, setIsAuthenticating] = useState(false);
+
+  const refreshSession = useCallback(async () => {
+    setAuthStatus("checking");
+    try {
+      const response = await fetch(`${API_BASE}/auth/me`, { credentials: "include" });
+      if (!response.ok) {
+        throw new Error("Unauthenticated");
+      }
+
+      const data = (await response.json()) as { email: string };
+      setCurrentUser(data.email);
+      setAuthError(null);
+      setAuthStatus("authenticated");
+    } catch {
+      setCurrentUser("");
+      setAuthStatus("unauthenticated");
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshSession();
+  }, [refreshSession]);
+
+  const handleLogin = useCallback(async (email: string, password: string) => {
+    setIsAuthenticating(true);
+    try {
+      const response = await fetch(`${API_BASE}/auth/login`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        credentials: "include",
+        body: JSON.stringify({ email, password }),
+      });
+
+      if (!response.ok) {
+        const payload = await response.json().catch(() => null) as { detail?: string } | null;
+        setAuthError(payload?.detail || "Invalid email or password");
+        setAuthStatus("unauthenticated");
+        return;
+      }
+
+      const data = (await response.json()) as { email: string };
+      setCurrentUser(data.email);
+      setAuthError(null);
+      setAuthStatus("authenticated");
+    } finally {
+      setIsAuthenticating(false);
+    }
+  }, []);
+
+  const handleLogout = useCallback(async () => {
+    await fetch(`${API_BASE}/auth/logout`, {
+      method: "POST",
+      credentials: "include",
+    }).catch(() => undefined);
+    setCurrentUser("");
+    setAuthError(null);
+    setAuthStatus("unauthenticated");
+  }, []);
+
+  if (authStatus === "checking") {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-gray-950 text-gray-100">
+        <div className="rounded-2xl border border-gray-800 bg-gray-900 px-6 py-5 text-sm text-gray-300">
+          Checking session...
+        </div>
+      </div>
+    );
+  }
+
+  if (authStatus !== "authenticated") {
+    return (
+      <LoginScreen
+        error={authError}
+        isSubmitting={isAuthenticating}
+        onLogin={handleLogin}
+      />
+    );
+  }
+
   return (
     <BrowserRouter>
-      <AppLayout />
+      <AppLayout currentUser={currentUser} onLogout={handleLogout} />
     </BrowserRouter>
   );
 }

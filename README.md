@@ -65,6 +65,9 @@ cp .env.example .env
 
 # Clean old processes, then start full dev stack
 ./scripts/run_dev.sh
+
+# Put the app on public port 80 using nginx
+./scripts/setup_nginx_http.sh
 ```
 
 ### Docker Deployment
