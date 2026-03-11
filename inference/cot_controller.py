@@ -1,80 +1,32 @@
 """
-Chain-of-Thought budget and mode control for Qwen3.5-35B-A3B.
+Chain-of-Thought (CoT) controller for Qwen3.5-35B-A3B.
 
-Three control levels:
-1. Hard switch: enable/disable thinking via chat_template_kwargs
-2. Thinking budget: token-level budget enforcement via logits processor
-3. Thinking visibility: control what the banker sees of thinking content
+Manages thinking behavior at three control levels:
+1. Hard switch (enable_thinking parameter)
+2. Thinking budget (token-level budget enforcement)
+3. Thinking visibility & streaming
 """
 
 from __future__ import annotations
 
 import structlog
 
+from inference.config import (
+    THINKING_BUDGET_PRESETS,
+    SAMPLING_THINKING_ON,
+    SAMPLING_THINKING_OFF,
+)
+
 logger = structlog.get_logger(__name__)
-
-BUDGET_PRESETS: dict[str, int] = {
-    "none": 0,
-    "minimal": 128,
-    "short": 512,
-    "standard": 2048,
-    "extended": 8192,
-    "deep": 32768,
-    "unlimited": -1,
-}
-
-# Sampling parameters per thinking mode (from Qwen3.5 documentation)
-THINKING_ON_SAMPLING = {
-    "temperature": 0.6,
-    "top_p": 0.95,
-    "top_k": 20,
-    "min_p": 0,
-}
-
-THINKING_OFF_SAMPLING = {
-    "temperature": 0.7,
-    "top_p": 0.8,
-    "top_k": 20,
-    "min_p": 0,
-}
-
-COT_PRESETS = {
-    "quick_lookup": {
-        "name": "Quick Lookup",
-        "description": "Fast response with no thinking — for simple lookups",
-        "mode": "off",
-        "budget": "none",
-        "visibility": "hidden",
-    },
-    "standard_analysis": {
-        "name": "Standard Analysis",
-        "description": "Balanced thinking for typical credit analysis",
-        "mode": "on",
-        "budget": "standard",
-        "visibility": "collapsed",
-    },
-    "deep_review": {
-        "name": "Deep Review",
-        "description": "Extended thinking for complex or edge-case decisions",
-        "mode": "on",
-        "budget": "deep",
-        "visibility": "streaming",
-    },
-    "debug_mode": {
-        "name": "Debug Mode",
-        "description": "Unlimited thinking with full visibility and all observability panels",
-        "mode": "on",
-        "budget": "unlimited",
-        "visibility": "full",
-    },
-}
 
 
 class CoTController:
     """
-    Manages Chain-of-Thought behavior for each inference request.
+    Manages Chain-of-Thought behavior at three control levels.
 
-    Builds SGLang-compatible request parameters from the banker's CoT config.
+    Level 1 - Hard Switch: enable_thinking parameter via chat_template_kwargs
+    Level 2 - Thinking Budget: token-level budget enforcement via logits processor
+    Level 3 - Thinking Visibility: controls what the banker sees of thinking
     """
 
     def __init__(self):
@@ -87,7 +39,7 @@ class CoTController:
         Build SGLang-compatible request parameters from CoT configuration.
 
         Args:
-            cot_config: Dict with keys 'mode', 'budget', 'visibility'
+            cot_config: Dict with keys: mode, budget, visibility
 
         Returns:
             Dict to merge into the SGLang API call.
@@ -101,47 +53,80 @@ class CoTController:
         # Level 1: Hard switch
         if mode == "off":
             params["chat_template_kwargs"] = {"enable_thinking": False}
-            params.update(THINKING_OFF_SAMPLING)
+            params.update(SAMPLING_THINKING_OFF)
+            logger.debug("cot_mode_off")
         else:
             params["chat_template_kwargs"] = {"enable_thinking": True}
-            params.update(THINKING_ON_SAMPLING)
+            params.update(SAMPLING_THINKING_ON)
+            logger.debug("cot_mode_on")
 
-        # Level 2: Budget (consumed by ThinkingBudgetProcessor)
-        params["_thinking_budget"] = self.resolve_budget(budget)
+        # Level 2: Budget (resolved to token count)
+        resolved_budget = self._resolve_budget(budget)
+        params["_thinking_budget"] = resolved_budget
+        logger.debug("cot_budget_set", budget=budget, resolved=resolved_budget)
 
-        # Level 3: Visibility (consumed by response streaming layer)
+        # Level 3: Visibility (handled by response streaming layer)
         params["_thinking_visibility"] = visibility
-
-        logger.info(
-            "cot_params_built",
-            mode=mode,
-            budget=budget,
-            resolved_budget=params["_thinking_budget"],
-            visibility=visibility,
-        )
 
         return params
 
-    def resolve_budget(self, budget: str | int) -> int:
-        """Resolve a budget preset name or integer to a token count."""
+    def _resolve_budget(self, budget: str | int) -> int:
+        """Resolve a budget preset name or raw int to a token count."""
         if isinstance(budget, int):
-            return budget
-        return BUDGET_PRESETS.get(str(budget), BUDGET_PRESETS["standard"])
+            return max(budget, -1)
+        return THINKING_BUDGET_PRESETS.get(budget, THINKING_BUDGET_PRESETS["standard"])
 
-    def get_presets(self) -> list[dict]:
-        """Return all available CoT presets."""
+    @staticmethod
+    def get_presets() -> list[dict]:
+        """Return all available CoT presets for the UI."""
+        descriptions = {
+            "none": "No thinking — equivalent to disabling CoT",
+            "minimal": "128 tokens — quick sanity check only",
+            "short": "512 tokens — brief reasoning",
+            "standard": "2048 tokens — balanced reasoning (default)",
+            "extended": "8192 tokens — complex multi-step analysis",
+            "deep": "32768 tokens — maximum reasoning depth",
+            "unlimited": "No limit — think until done",
+        }
         return [
-            {"id": k, **v}
-            for k, v in COT_PRESETS.items()
+            {
+                "name": name,
+                "budget": tokens,
+                "description": descriptions.get(name, ""),
+            }
+            for name, tokens in THINKING_BUDGET_PRESETS.items()
         ]
 
-    def get_preset(self, name: str) -> dict | None:
-        """Return a specific preset by ID."""
-        preset = COT_PRESETS.get(name)
-        if preset:
-            return {"id": name, **preset}
-        return None
-
-    def get_budget_presets(self) -> dict[str, int]:
-        """Return all budget presets with their token counts."""
-        return dict(BUDGET_PRESETS)
+    @staticmethod
+    def get_workflow_presets() -> list[dict]:
+        """Pre-configured presets for common banking workflows."""
+        return [
+            {
+                "name": "Quick Lookup",
+                "description": "Fast response, no thinking",
+                "mode": "off",
+                "budget": "none",
+                "visibility": "hidden",
+            },
+            {
+                "name": "Standard Analysis",
+                "description": "Balanced reasoning, collapsed view",
+                "mode": "on",
+                "budget": "standard",
+                "visibility": "collapsed",
+            },
+            {
+                "name": "Deep Review",
+                "description": "Extended reasoning, streaming view",
+                "mode": "on",
+                "budget": "deep",
+                "visibility": "streaming",
+            },
+            {
+                "name": "Debug Mode",
+                "description": "Unlimited thinking, full observability",
+                "mode": "on",
+                "budget": "unlimited",
+                "visibility": "full",
+            },
+        ]

@@ -1,37 +1,29 @@
 """
-SGLang server launcher with MoE expert routing capture hooks.
+SGLang inference server launcher with MoE expert routing capture.
 
-Launches the SGLang inference server for Qwen3.5-35B-A3B-FP8 with:
-- MoE expert-level observability hooks
+Launches the Qwen3.5-35B-A3B-FP8 model on SGLang with:
+- MoE expert routing hooks for observability
 - Prometheus metrics endpoint
-- Qwen3 reasoning parser for <think> block separation
-- Qwen3 coder tool-call parser for function calling
+- Reasoning parser for thinking tokens
+- Tool call parser for function calling
 """
 
 import asyncio
-import logging
 import subprocess
 import sys
-import time
+import signal
+import structlog
 from pathlib import Path
 
-import httpx
-import structlog
-
 from inference.config import (
-    CONTEXT_LENGTH,
-    MEM_FRACTION_STATIC,
-    MODEL_PATH,
-    PORT,
-    REASONING_PARSER,
-    TOOL_CALL_PARSER,
-    TP_SIZE,
+    MODEL_PATH, CONTEXT_LENGTH, TP_SIZE, PORT,
+    MEM_FRACTION_STATIC, REASONING_PARSER, TOOL_CALL_PARSER,
 )
 
 logger = structlog.get_logger(__name__)
 
 
-def build_server_command() -> list[str]:
+def build_launch_command() -> list[str]:
     """Build the SGLang server launch command."""
     return [
         sys.executable, "-m", "sglang.launch_server",
@@ -46,65 +38,79 @@ def build_server_command() -> list[str]:
     ]
 
 
-async def wait_for_server(timeout: float = 300.0) -> bool:
-    """Wait for the SGLang server to become healthy."""
-    start = time.monotonic()
-    async with httpx.AsyncClient() as client:
-        while time.monotonic() - start < timeout:
+class SGLangServer:
+    """Manages the SGLang inference server lifecycle."""
+
+    def __init__(self):
+        self.process: subprocess.Popen | None = None
+        self._shutdown_event = asyncio.Event()
+
+    async def start(self):
+        """Launch the SGLang server as a subprocess."""
+        cmd = build_launch_command()
+        logger.info("starting_sglang_server", command=" ".join(cmd))
+
+        self.process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+
+        # Wait for server readiness
+        await self._wait_for_ready()
+        logger.info("sglang_server_ready", port=PORT)
+
+    async def _wait_for_ready(self, timeout: float = 300):
+        """Poll until SGLang server is accepting requests."""
+        import httpx
+
+        url = f"http://localhost:{PORT}/health"
+        deadline = asyncio.get_event_loop().time() + timeout
+
+        while asyncio.get_event_loop().time() < deadline:
             try:
-                resp = await client.get(f"http://localhost:{PORT}/health")
-                if resp.status_code == 200:
-                    logger.info("sglang_server_ready", port=PORT)
-                    return True
-            except httpx.ConnectError:
+                async with httpx.AsyncClient() as client:
+                    resp = await client.get(url, timeout=5)
+                    if resp.status_code == 200:
+                        return
+            except Exception:
                 pass
-            await asyncio.sleep(2.0)
-    logger.error("sglang_server_timeout", timeout=timeout)
-    return False
+            await asyncio.sleep(2)
 
+        raise TimeoutError(f"SGLang server did not become ready within {timeout}s")
 
-def launch_server() -> subprocess.Popen:
-    """Launch the SGLang server as a subprocess."""
-    cmd = build_server_command()
-    logger.info("launching_sglang_server", command=" ".join(cmd))
+    async def stop(self):
+        """Gracefully stop the SGLang server."""
+        if self.process:
+            logger.info("stopping_sglang_server")
+            self.process.send_signal(signal.SIGTERM)
+            self.process.wait(timeout=30)
+            self.process = None
 
-    process = subprocess.Popen(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-    )
-    return process
+    @property
+    def is_running(self) -> bool:
+        return self.process is not None and self.process.poll() is None
 
 
 async def main():
-    """Main entry point: launch server, wait for health, register MoE hooks."""
-    from inference.moe_hooks import MoETraceCollector
-    from inference.observability import setup_prometheus_metrics
+    """Entry point for standalone server launch."""
+    server = SGLangServer()
 
-    logger.info("starting_creditscope_inference")
+    loop = asyncio.get_event_loop()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(sig, lambda: asyncio.create_task(server.stop()))
 
-    process = launch_server()
-    healthy = await wait_for_server()
+    await server.start()
 
-    if not healthy:
-        process.terminate()
-        sys.exit(1)
-
-    # Set up Prometheus metrics
-    setup_prometheus_metrics()
-
-    # Register MoE hooks (connects to the running server's model internals)
-    collector = MoETraceCollector()
-    logger.info("moe_hooks_registered")
-
-    # Keep alive
+    # Keep running until shutdown
     try:
-        process.wait()
-    except KeyboardInterrupt:
-        logger.info("shutting_down_inference")
-        process.terminate()
-        process.wait(timeout=30)
+        while server.is_running:
+            await asyncio.sleep(1)
+    except asyncio.CancelledError:
+        pass
+    finally:
+        await server.stop()
 
 
 if __name__ == "__main__":

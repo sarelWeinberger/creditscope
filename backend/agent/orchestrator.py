@@ -1,416 +1,275 @@
 """
-CreditScope Agent Orchestrator.
-Implements a ReAct loop using the SGLang inference server.
+ReAct-style agent orchestrator for CreditScope.
+
+Implements the main agent loop that:
+1. Receives natural language queries from bankers
+2. Reasons about what information is needed
+3. Calls appropriate tools to gather data
+4. Synthesizes responses with credit assessments
+5. Returns responses with full tool execution traces and MoE data
 """
-import asyncio
+
+from __future__ import annotations
+
 import json
 import time
 import uuid
-from datetime import date
-from typing import Any, AsyncGenerator, Dict, List, Optional
+from dataclasses import dataclass, field
+from typing import Any
 
 import httpx
+import structlog
 
-from agent.image_handler import ImageHandler
-from agent.prompts import SYSTEM_PROMPT, TOOLS
-from agent.tool_registry import ToolRegistry
-from schemas.credit import ExecutionStep, AgentResponse
-from schemas.thinking import CoTConfig
+from backend.agent.prompts import SYSTEM_PROMPT, TOOLS
+from backend.agent.tool_registry import ToolRegistry
+from backend.agent.image_handler import ImageHandler
+from backend.schemas.thinking import CoTConfig
+from inference.cot_controller import CoTController
+from inference.config import PORT as SGLANG_PORT
+
+logger = structlog.get_logger(__name__)
+
+MAX_STEPS = 8
+SGLANG_BASE_URL = f"http://localhost:{SGLANG_PORT}"
 
 
-SGLANG_URL = "http://localhost:8000"
-SIDECAR_URL = "http://localhost:8001"
-MAX_REACT_STEPS = 8
-MODEL_NAME = "creditscope"
+@dataclass
+class AgentResponse:
+    """Complete agent response with traces."""
+    answer: str
+    thinking: dict | None = None
+    execution_trace: list[dict] = field(default_factory=list)
+    moe_traces: dict | None = None
+    tokens: dict = field(default_factory=lambda: {"input": 0, "output": 0, "thinking": 0})
+    session_id: str = ""
+    request_id: str = ""
+
+
+class AdaptiveCoTStrategy:
+    """
+    Automatically adjusts thinking budget based on task complexity.
+
+    Rules:
+    1. Simple lookups → budget: "short" (512 tokens)
+    2. Single-factor analysis → budget: "standard" (2048 tokens)
+    3. Multi-factor scoring → budget: "extended" (8192 tokens)
+    4. Complex judgment calls → budget: "deep" (32768 tokens)
+    5. Image processing → budget: "standard" (2048 tokens)
+    """
+
+    SIMPLE_PATTERNS = ["what is", "look up", "find", "show me", "get", "list"]
+    MEDIUM_PATTERNS = ["calculate", "ratio", "history", "analyze", "check"]
+    COMPLEX_PATTERNS = [
+        "adjusted", "if we give", "mortgage", "compare",
+        "recommend", "should we", "evaluate", "assess",
+    ]
+    DEEP_PATTERNS = [
+        "edge case", "exception", "override", "complex",
+        "unusual", "restructure", "comprehensive", "full review",
+    ]
+
+    def classify_complexity(self, query: str, has_images: bool = False) -> str:
+        """Classify query complexity to determine thinking budget."""
+        if has_images:
+            return "standard"
+
+        query_lower = query.lower()
+        if any(p in query_lower for p in self.DEEP_PATTERNS):
+            return "deep"
+        if any(p in query_lower for p in self.COMPLEX_PATTERNS):
+            return "extended"
+        if any(p in query_lower for p in self.MEDIUM_PATTERNS):
+            return "standard"
+        return "short"
 
 
 class CreditScopeAgent:
     """
-    ReAct-loop agent that:
-    1. Calls the SGLang model with tool definitions
-    2. Executes tool calls when requested
-    3. Loops until the model produces a final answer
-    4. Collects MoE traces and thinking stats
+    ReAct-style agent for credit analysis.
+
+    Processes banker queries through an iterative reasoning loop,
+    calling tools as needed and synthesizing credit assessments.
     """
 
-    def __init__(
-        self,
-        sglang_url: str = SGLANG_URL,
-        sidecar_url: str = SIDECAR_URL,
-        session_factory=None,
-        institution_name: str = "CreditScope Bank",
-    ):
-        self.sglang_url = sglang_url
-        self.sidecar_url = sidecar_url
-        self.institution_name = institution_name
-
-        self._http = httpx.AsyncClient(
-            timeout=httpx.Timeout(120.0, connect=10.0),
-            limits=httpx.Limits(max_connections=20),
-        )
-        self.tool_registry = ToolRegistry(session_factory)
+    def __init__(self):
+        self.tool_registry = ToolRegistry()
         self.image_handler = ImageHandler()
-
-        from inference.cot_controller import AdaptiveCoTStrategy
-        self._adaptive = AdaptiveCoTStrategy()
+        self.cot_controller = CoTController()
+        self.adaptive_strategy = AdaptiveCoTStrategy()
+        self.tool_schemas = TOOLS
+        self.system_prompt = SYSTEM_PROMPT.format(
+            tool_descriptions=json.dumps(TOOLS, indent=2)
+        )
+        self._client = httpx.AsyncClient(timeout=120.0)
 
     async def process_query(
         self,
         query: str,
-        images: Optional[List[bytes]] = None,
-        session_id: Optional[str] = None,
-        cot_config: Optional[CoTConfig] = None,
+        images: list[bytes] | None = None,
+        cot_config: CoTConfig | None = None,
+        session_id: str | None = None,
     ) -> AgentResponse:
         """
-        Process a user query through the full ReAct loop.
+        Main agent loop.
 
         Args:
-            query: Natural language query
-            images: Optional list of image bytes to include
-            session_id: Session identifier for tracking
-            cot_config: Chain-of-thought configuration
-
-        Returns:
-            AgentResponse with answer, trace, and MoE data
+            query: Natural language query from the banker
+            images: Optional list of image bytes for document processing
+            cot_config: Chain-of-Thought configuration
+            session_id: Session identifier for context continuity
         """
-        if session_id is None:
-            session_id = str(uuid.uuid4())
+        request_id = str(uuid.uuid4())
+        sid = session_id or str(uuid.uuid4())
 
-        start_time = time.monotonic()
+        # Resolve CoT config
+        cot = cot_config or CoTConfig()
+        if cot.budget == "auto":
+            auto_budget = self.adaptive_strategy.classify_complexity(
+                query, has_images=bool(images)
+            )
+            cot = CoTConfig(mode=cot.mode, budget=auto_budget, visibility=cot.visibility)
 
-        # Auto-classify complexity if needed
-        if cot_config is None or (cot_config and cot_config.mode == "auto"):
-            cot_config = self._adaptive.recommend_cot_config(query)
-
-        # Resolve SGLang params
-        from inference.cot_controller import CoTController
-        cot_params = CoTController.build_request_params(cot_config)
+        request_params = self.cot_controller.build_request_params(cot.model_dump())
 
         # Build initial messages
-        system_content = SYSTEM_PROMPT.format(
-            current_date=date.today().isoformat(),
-            institution_name=self.institution_name,
-        )
+        messages = [{"role": "system", "content": self.system_prompt}]
 
-        messages = [{"role": "system", "content": system_content}]
-
-        # Handle images
         if images:
-            images_data = await self.image_handler.process_images(images, {})
-            user_content = self.image_handler.build_multimodal_message(images_data, query)
+            image_data = await self.image_handler.process_images(images, context=query)
+            content_parts: list[dict] = [{"type": "text", "text": query}]
+            for img in image_data:
+                if img["type"] == "image_url":
+                    content_parts.append({"type": "image_url", "image_url": img["image_url"]})
+                elif img["type"] == "extracted_data":
+                    content_parts.append({
+                        "type": "text",
+                        "text": f"\n[Extracted document data: {json.dumps(img['data'])}]",
+                    })
+            messages.append({"role": "user", "content": content_parts})
         else:
-            user_content = query
+            messages.append({"role": "user", "content": query})
 
-        messages.append({"role": "user", "content": user_content})
-
-        execution_trace: List[ExecutionStep] = []
-        thinking_data: Optional[Dict[str, Any]] = None
-        tokens_used: Dict[str, int] = {}
+        execution_trace: list[dict] = []
+        total_tokens = {"input": 0, "output": 0, "thinking": 0}
+        thinking_data: dict | None = None
 
         # ReAct loop
-        for step in range(MAX_REACT_STEPS):
-            response = await self.call_model(
-                messages=messages,
-                tools=TOOLS,
-                **cot_params,
-            )
+        for step in range(MAX_STEPS):
+            start_time = time.time()
 
-            # Extract thinking if present
-            thinking_content = response.get("thinking", "")
-            if thinking_content and thinking_data is None:
+            response = await self._call_model(messages, request_params)
+            duration_ms = (time.time() - start_time) * 1000
+
+            # Track tokens
+            usage = response.get("usage", {})
+            total_tokens["input"] += usage.get("prompt_tokens", 0)
+            total_tokens["output"] += usage.get("completion_tokens", 0)
+
+            # Extract thinking content
+            choice = response.get("choices", [{}])[0]
+            message = choice.get("message", {})
+            reasoning = message.get("reasoning_content")
+            if reasoning and thinking_data is None:
                 thinking_data = {
-                    "content": thinking_content,
-                    "tokens": len(thinking_content.split()),
-                    "step": step,
-                    "budget_preset": cot_config.budget if cot_config else "standard",
+                    "content": reasoning if cot.visibility != "hidden" else None,
+                    "tokens_used": len(reasoning.split()) if reasoning else 0,
+                    "budget": request_params.get("_thinking_budget", 2048),
+                    "budget_utilization_pct": 0.0,
+                    "was_budget_enforced": False,
+                    "duration_ms": duration_ms,
                 }
 
-            # Update token counts
-            usage = response.get("usage", {})
-            tokens_used["prompt"] = usage.get("prompt_tokens", 0)
-            tokens_used["completion"] = usage.get("completion_tokens", 0)
-
-            choices = response.get("choices", [])
-            if not choices:
-                break
-
-            choice = choices[0]
-            message = choice.get("message", {})
-            finish_reason = choice.get("finish_reason", "stop")
-
-            # Add assistant message to history
-            messages.append({"role": "assistant", **{k: v for k, v in message.items() if k != "role"}})
-
             # Check for tool calls
-            tool_calls = message.get("tool_calls", []) or []
+            tool_calls = message.get("tool_calls", [])
 
-            if not tool_calls or finish_reason == "stop":
-                # Model has produced a final answer
-                final_answer = message.get("content", "")
-                if thinking_content and not final_answer:
-                    # Sometimes thinking IS the content
-                    final_answer = thinking_content
+            if tool_calls:
+                messages.append(message)
+                for tc in tool_calls:
+                    func = tc.get("function", {})
+                    tool_name = func.get("name", "")
+                    try:
+                        tool_args = json.loads(func.get("arguments", "{}"))
+                    except json.JSONDecodeError:
+                        tool_args = {}
 
-                # Fetch MoE trace
-                moe_trace = await self.get_moe_trace()
+                    tool_start = time.time()
+                    result = await self.tool_registry.execute(tool_name, tool_args)
+                    tool_duration = (time.time() - tool_start) * 1000
 
-                total_duration_ms = round((time.monotonic() - start_time) * 1000, 2)
+                    trace_entry = {
+                        "step": step,
+                        "tool": tool_name,
+                        "input": tool_args,
+                        "output": result,
+                        "duration_ms": round(tool_duration, 1),
+                    }
+                    execution_trace.append(trace_entry)
 
-                return AgentResponse(
-                    session_id=session_id,
-                    answer=final_answer,
-                    execution_trace=execution_trace,
-                    moe_traces=moe_trace,
-                    tokens_used=tokens_used,
-                    thinking=thinking_data,
-                    total_duration_ms=total_duration_ms,
-                    model=MODEL_NAME,
-                )
-
-            # Execute all tool calls in this step
-            tool_results = await asyncio.gather(
-                *[self.execute_tool(tc) for tc in tool_calls]
-            )
-
-            for tc, (result, step_data) in zip(tool_calls, tool_results):
-                execution_trace.append(step_data)
-                # Add tool result to messages
-                messages.append(
-                    {
+                    messages.append({
                         "role": "tool",
                         "tool_call_id": tc.get("id", ""),
-                        "content": result,
-                    }
+                        "content": json.dumps(result) if isinstance(result, dict) else str(result),
+                    })
+            else:
+                # Final response — no more tool calls
+                answer = message.get("content", "")
+                return AgentResponse(
+                    answer=answer,
+                    thinking=thinking_data,
+                    execution_trace=execution_trace,
+                    moe_traces=None,
+                    tokens=total_tokens,
+                    session_id=sid,
+                    request_id=request_id,
                 )
 
-        # Max steps reached — return best effort
-        moe_trace = await self.get_moe_trace()
-        total_duration_ms = round((time.monotonic() - start_time) * 1000, 2)
-        last_content = ""
-        for msg in reversed(messages):
-            if msg.get("role") == "assistant" and msg.get("content"):
-                last_content = msg["content"]
-                break
-
         return AgentResponse(
-            session_id=session_id,
-            answer=last_content or "Maximum reasoning steps reached. Please try a more specific query.",
-            execution_trace=execution_trace,
-            moe_traces=moe_trace,
-            tokens_used=tokens_used,
+            answer="I've reached my maximum reasoning steps. Here's what I found so far based on the tools I called.",
             thinking=thinking_data,
-            total_duration_ms=total_duration_ms,
-            model=MODEL_NAME,
+            execution_trace=execution_trace,
+            tokens=total_tokens,
+            session_id=sid,
+            request_id=request_id,
         )
 
-    async def call_model(
-        self,
-        messages: List[Dict[str, Any]],
-        tools: Optional[List[Dict[str, Any]]] = None,
-        **kwargs,
-    ) -> Dict[str, Any]:
-        """
-        Make a single call to the SGLang model.
-
-        Returns the raw API response dict.
-        """
-        payload: Dict[str, Any] = {
-            "model": MODEL_NAME,
+    async def _call_model(self, messages: list[dict], params: dict) -> dict:
+        """Call the SGLang inference server."""
+        payload = {
+            "model": "default",
             "messages": messages,
+            "tools": self.tool_schemas,
+            "tool_choice": "auto",
+            "max_tokens": 4096,
+            "stream": False,
         }
 
-        if tools:
-            payload["tools"] = tools
-            payload["tool_choice"] = "auto"
+        # Add sampling params
+        for key in ("temperature", "top_p", "top_k", "min_p"):
+            if key in params:
+                payload[key] = params[key]
 
-        # Merge sampling params
-        sampling_params = kwargs.pop("sampling_params", {})
-        payload.update(sampling_params)
-
-        # Chat template kwargs (thinking settings)
-        chat_kwargs = kwargs.pop("chat_template_kwargs", {})
-        if chat_kwargs:
-            payload["chat_template_kwargs"] = chat_kwargs
-
-        payload.update(kwargs)
+        # Add chat template kwargs
+        if "chat_template_kwargs" in params:
+            payload["chat_template_kwargs"] = params["chat_template_kwargs"]
 
         try:
-            resp = await self._http.post(
-                f"{self.sglang_url}/v1/chat/completions",
+            resp = await self._client.post(
+                f"{SGLANG_BASE_URL}/v1/chat/completions",
                 json=payload,
             )
             resp.raise_for_status()
             return resp.json()
-        except httpx.HTTPStatusError as e:
-            raise RuntimeError(f"SGLang API error {e.response.status_code}: {e.response.text}")
-        except httpx.ConnectError:
-            raise RuntimeError(f"Cannot connect to SGLang at {self.sglang_url}")
-
-    async def call_model_streaming(
-        self,
-        messages: List[Dict[str, Any]],
-        tools: Optional[List[Dict[str, Any]]] = None,
-        **kwargs,
-    ) -> AsyncGenerator[Dict[str, Any], None]:
-        """
-        Stream tokens from the SGLang model.
-
-        Yields dicts: {type, content, ...}
-        """
-        from inference.thinking_interceptor import ThinkingStreamParser
-
-        payload: Dict[str, Any] = {
-            "model": MODEL_NAME,
-            "messages": messages,
-            "stream": True,
-        }
-
-        if tools:
-            payload["tools"] = tools
-            payload["tool_choice"] = "auto"
-
-        sampling_params = kwargs.pop("sampling_params", {})
-        payload.update(sampling_params)
-        chat_kwargs = kwargs.pop("chat_template_kwargs", {})
-        if chat_kwargs:
-            payload["chat_template_kwargs"] = chat_kwargs
-        payload.update(kwargs)
-
-        parser = ThinkingStreamParser()
-
-        async with self._http.stream(
-            "POST",
-            f"{self.sglang_url}/v1/chat/completions",
-            json=payload,
-        ) as resp:
-            resp.raise_for_status()
-            async for line in resp.aiter_lines():
-                if not line.startswith("data: "):
-                    continue
-                data_str = line[6:].strip()
-                if data_str == "[DONE]":
-                    for event in parser.finish():
-                        yield event
-                    break
-
-                try:
-                    chunk = json.loads(data_str)
-                except json.JSONDecodeError:
-                    continue
-
-                choices = chunk.get("choices", [])
-                if not choices:
-                    continue
-
-                delta = choices[0].get("delta", {})
-                content = delta.get("content", "") or ""
-                reasoning = delta.get("reasoning_content", "") or ""
-
-                # Process thinking tokens
-                if reasoning:
-                    for event in parser.process_chunk(f"<think>{reasoning}</think>"):
-                        yield event
-                elif content:
-                    for event in parser.process_chunk(content):
-                        yield event
-
-                # Forward tool calls
-                tool_calls = delta.get("tool_calls", [])
-                if tool_calls:
-                    yield {"type": "tool_call", "tool_calls": tool_calls, "content": ""}
-
-    async def execute_tool(
-        self, tool_call: Dict[str, Any]
-    ) -> tuple[str, ExecutionStep]:
-        """
-        Execute a single tool call from the model.
-
-        Returns:
-            (result_json_string, ExecutionStep)
-        """
-        tool_name = tool_call.get("function", {}).get("name", "")
-        tool_args_str = tool_call.get("function", {}).get("arguments", "{}")
-        tool_call_id = tool_call.get("id", "")
-
-        try:
-            tool_input = json.loads(tool_args_str) if isinstance(tool_args_str, str) else tool_args_str
-        except json.JSONDecodeError:
-            tool_input = {}
-
-        result = await self.tool_registry.execute_tool(tool_name, tool_input)
-        result_str = self.tool_registry.format_result(tool_name, result)
-
-        step = ExecutionStep(
-            step=0,  # Will be set by caller
-            tool_name=tool_name,
-            tool_input=tool_input,
-            tool_output=result.get("result"),
-            duration_ms=result.get("duration_ms", 0.0),
-            success=result.get("success", False),
-            error=result.get("error"),
-        )
-
-        return result_str, step
-
-    async def get_moe_trace(self) -> Optional[Dict[str, Any]]:
-        """Fetch the latest MoE trace from the sidecar."""
-        try:
-            resp = await self._http.get(f"{self.sidecar_url}/moe/latest", timeout=3.0)
-            if resp.status_code == 200:
-                data = resp.json()
-                return data.get("trace")
-        except Exception:
-            pass
-        return None
-
-    def _compare_moe_phases(
-        self,
-        moe_trace: Optional[Dict[str, Any]],
-        thinking_stats: Optional[Dict[str, Any]],
-    ) -> Dict[str, Any]:
-        """
-        Compare expert activations between thinking and response phases.
-        Returns divergence analysis.
-        """
-        if not moe_trace:
-            return {}
-
-        thinking_experts: set = set()
-        response_experts: set = set()
-
-        for key, value in moe_trace.items():
-            if isinstance(value, list):
-                for event in value:
-                    if isinstance(event, dict):
-                        selected = event.get("selected_experts", [])
-                        flat = []
-                        for s in selected:
-                            if isinstance(s, list):
-                                flat.extend(s)
-                            else:
-                                flat.append(s)
-
-                        if "thinking_" in key:
-                            thinking_experts.update(flat)
-                        else:
-                            response_experts.update(flat)
-
-        common = thinking_experts & response_experts
-        think_only = thinking_experts - response_experts
-        response_only = response_experts - thinking_experts
-
-        total = len(thinking_experts | response_experts) or 1
-        divergence = len(think_only | response_only) / total
-
-        return {
-            "common_experts": sorted(common),
-            "thinking_only_experts": sorted(think_only),
-            "response_only_experts": sorted(response_only),
-            "divergence_score": round(divergence, 4),
-            "thinking_experts_count": len(thinking_experts),
-            "response_experts_count": len(response_experts),
-        }
+        except Exception as e:
+            logger.error("model_call_failed", error=str(e))
+            return {
+                "choices": [{
+                    "message": {
+                        "content": f"I encountered an error communicating with the model: {e}",
+                    }
+                }],
+                "usage": {},
+            }
 
     async def close(self):
-        """Shut down the HTTP client."""
-        await self._http.aclose()
+        """Cleanup resources."""
+        await self._client.aclose()

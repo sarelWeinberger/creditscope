@@ -1,0 +1,120 @@
+version: "3.9"
+
+services:
+  # SGLang Inference Server
+  inference:
+    build:
+      context: .
+      dockerfile: Dockerfile.inference
+    image: creditscope-inference:latest
+    runtime: nvidia
+    environment:
+      - MODEL_PATH=${MODEL_PATH:-Qwen/Qwen3.5-35B-A3B-FP8}
+      - CONTEXT_LENGTH=${CONTEXT_LENGTH:-32768}
+      - TP_SIZE=${TP_SIZE:-1}
+      - SGLANG_PORT=8000
+      - MEM_FRACTION_STATIC=${MEM_FRACTION_STATIC:-0.85}
+      - HUGGING_FACE_HUB_TOKEN=${HUGGING_FACE_HUB_TOKEN}
+    ports:
+      - "8000:8000"
+    volumes:
+      - ${MODEL_CACHE_DIR:-~/.cache/huggingface}:/root/.cache/huggingface
+      - ./inference:/app/inference
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 120s
+    networks:
+      - creditscope-net
+
+  # FastAPI Backend
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    image: creditscope-backend:latest
+    environment:
+      - SGLANG_URL=http://inference:8000
+      - DATABASE_URL=${DATABASE_URL:-sqlite:///./creditscope.db}
+      - SEED_DB=${SEED_DB:-true}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - PROMETHEUS_MULTIPROC_DIR=/tmp/prometheus
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./backend:/app/backend
+      - ./data:/app/data
+    depends_on:
+      inference:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    networks:
+      - creditscope-net
+
+  # React Frontend
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    image: creditscope-frontend:latest
+    ports:
+      - "3000:3000"
+    environment:
+      - VITE_API_URL=http://localhost:8080
+    depends_on:
+      - backend
+    networks:
+      - creditscope-net
+
+  # Prometheus for metrics
+  prometheus:
+    image: prom/prometheus:v2.51.0
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--web.enable-lifecycle"
+    networks:
+      - creditscope-net
+
+  # Grafana for dashboards
+  grafana:
+    image: grafana/grafana:10.4.0
+    ports:
+      - "3001:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin}
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning
+      - ./grafana/dashboards:/var/lib/grafana/dashboards
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      - prometheus
+    networks:
+      - creditscope-net
+
+networks:
+  creditscope-net:
+    driver: bridge
+
+volumes:
+  prometheus-data:
+  grafana-data:

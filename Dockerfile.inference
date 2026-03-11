@@ -1,0 +1,32 @@
+FROM nvidia/cuda:12.4.0-runtime-ubuntu22.04
+
+WORKDIR /app
+
+# System dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3.11 \
+    python3-pip \
+    python3.11-venv \
+    curl \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+# Update alternatives for python
+RUN update-alternatives --install /usr/bin/python python /usr/bin/python3.11 1
+
+# Install PyTorch and SGLang
+RUN pip install --no-cache-dir \
+    torch==2.4.0 \
+    sglang[all]==0.4.5 \
+    structlog \
+    prometheus-client
+
+# Copy inference code
+COPY inference/ /app/inference/
+
+ENV PYTHONPATH=/app
+ENV PYTHONUNBUFFERED=1
+
+EXPOSE 8000
+
+CMD ["python", "-m", "inference.server"]

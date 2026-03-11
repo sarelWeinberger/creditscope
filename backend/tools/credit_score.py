@@ -1,350 +1,269 @@
 """
-FICO-like credit score calculator.
-Implements the five standard credit score factors with FICO-approximate weights.
+Base credit score calculator using FICO-like methodology.
+
+Weights:
+- Payment History (35%): Late payments, defaults, bankruptcies, collections
+- Amounts Owed (30%): Credit utilization ratio, total debt load
+- Length of History (15%): Years of credit history
+- New Credit (10%): Hard inquiries in last 6/12 months
+- Credit Mix (10%): Variety of account types
+
+Score range: 300-850
 """
-import math
-from typing import Any, Dict, List
 
 
-def _payment_history_score(customer) -> tuple[float, str, Dict[str, Any]]:
-    """
-    Payment History (35% weight).
-    Penalizes late payments, collections, bankruptcies, foreclosures, charge-offs.
-    """
-    total_payments = customer.on_time_payments + customer.late_payments_30d + \
-                     customer.late_payments_60d + customer.late_payments_90d
+def calculate_base_credit_score(customer) -> dict:
+    """Calculate base credit score for a customer using FICO-like methodology."""
+    # Payment History (35%) — score 0-100
+    payment_score = _score_payment_history(customer)
 
-    if total_payments == 0:
-        raw_score = 50.0  # No history
-        explanation = "No payment history available."
-        on_time_rate = 0.0
-    else:
-        # Weighted severity of delinquencies
-        severity_penalty = (
-            customer.late_payments_30d * 1.0
-            + customer.late_payments_60d * 2.5
-            + customer.late_payments_90d * 4.0
-            + customer.collections * 8.0
-            + customer.bankruptcies * 20.0
-            + customer.foreclosures * 15.0
-            + customer.charge_offs * 10.0
-        )
+    # Amounts Owed (30%) — score 0-100
+    amounts_score = _score_amounts_owed(customer)
 
-        on_time_rate = customer.on_time_payments / total_payments
-        base_score = on_time_rate * 100.0
-        raw_score = max(0.0, base_score - severity_penalty * 2.0)
-        raw_score = min(100.0, raw_score)
+    # Length of History (15%) — score 0-100
+    history_score = _score_history_length(customer)
 
-        if raw_score >= 90:
-            explanation = "Excellent payment record with minimal or no delinquencies."
-        elif raw_score >= 70:
-            explanation = "Good payment history with few minor late payments."
-        elif raw_score >= 50:
-            explanation = "Mixed payment history with some delinquencies noted."
-        elif raw_score >= 30:
-            explanation = "Poor payment history with significant delinquencies."
-        else:
-            explanation = "Very poor payment history; multiple serious delinquencies, collections, or bankruptcies."
+    # New Credit (10%) — score 0-100
+    new_credit_score = _score_new_credit(customer)
 
-    breakdown = {
-        "on_time_payments": customer.on_time_payments,
-        "late_30d": customer.late_payments_30d,
-        "late_60d": customer.late_payments_60d,
-        "late_90d": customer.late_payments_90d,
-        "collections": customer.collections,
-        "bankruptcies": customer.bankruptcies,
-        "foreclosures": customer.foreclosures,
-        "charge_offs": customer.charge_offs,
-        "on_time_rate": round(on_time_rate, 4) if total_payments > 0 else 0.0,
-        "factor_score": round(raw_score, 2),
-    }
-    return raw_score, explanation, breakdown
+    # Credit Mix (10%) — score 0-100
+    mix_score = _score_credit_mix(customer)
 
-
-def _utilization_score(customer) -> tuple[float, str, Dict[str, Any]]:
-    """
-    Credit Utilization (30% weight).
-    Lower utilization = better score.
-    """
-    if customer.total_credit_limit <= 0:
-        utilization = 0.0
-        raw_score = 50.0
-        explanation = "No revolving credit accounts found."
-    else:
-        utilization = customer.total_credit_used / customer.total_credit_limit
-        utilization = min(utilization, 1.0)
-
-        # Score function: 100 at 0%, rapid decay above 30%
-        if utilization <= 0.10:
-            raw_score = 95.0 + (0.10 - utilization) / 0.10 * 5.0
-        elif utilization <= 0.30:
-            raw_score = 80.0 + (0.30 - utilization) / 0.20 * 15.0
-        elif utilization <= 0.50:
-            raw_score = 55.0 + (0.50 - utilization) / 0.20 * 25.0
-        elif utilization <= 0.75:
-            raw_score = 25.0 + (0.75 - utilization) / 0.25 * 30.0
-        else:
-            raw_score = max(0.0, 25.0 * (1.0 - utilization))
-
-        raw_score = min(100.0, max(0.0, raw_score))
-
-        pct = round(utilization * 100, 1)
-        if utilization <= 0.10:
-            explanation = f"Excellent utilization at {pct}%. Keeping balances very low is optimal."
-        elif utilization <= 0.30:
-            explanation = f"Good utilization at {pct}%. Below 30% is generally recommended."
-        elif utilization <= 0.50:
-            explanation = f"Moderate utilization at {pct}%. Reducing balances will improve this factor."
-        elif utilization <= 0.75:
-            explanation = f"High utilization at {pct}%. Significantly impacts score; reduce balances."
-        else:
-            explanation = f"Very high utilization at {pct}%. Near or at credit limits is a major negative signal."
-
-    breakdown = {
-        "total_credit_limit": customer.total_credit_limit,
-        "total_credit_used": customer.total_credit_used,
-        "utilization_ratio": round(utilization, 4) if customer.total_credit_limit > 0 else 0.0,
-        "factor_score": round(raw_score, 2),
-    }
-    return raw_score, explanation, breakdown
-
-
-def _credit_age_score(customer) -> tuple[float, str, Dict[str, Any]]:
-    """
-    Length of Credit History (15% weight).
-    Rewards longer histories.
-    """
-    years = customer.credit_history_years
-
-    if years <= 0:
-        raw_score = 10.0
-        explanation = "No established credit history."
-    elif years <= 1:
-        raw_score = 25.0
-        explanation = "Very new credit history (under 1 year)."
-    elif years <= 2:
-        raw_score = 40.0
-        explanation = "Short credit history (1-2 years)."
-    elif years <= 5:
-        raw_score = 60.0
-        explanation = "Developing credit history (2-5 years)."
-    elif years <= 10:
-        raw_score = 80.0
-        explanation = "Established credit history (5-10 years)."
-    elif years <= 20:
-        raw_score = 92.0
-        explanation = "Long credit history (10-20 years). Very positive."
-    else:
-        raw_score = 100.0
-        explanation = "Excellent credit history length (20+ years)."
-
-    breakdown = {
-        "credit_history_years": years,
-        "num_accounts": customer.num_credit_accounts,
-        "open_accounts": customer.num_open_accounts,
-        "factor_score": round(raw_score, 2),
-    }
-    return raw_score, explanation, breakdown
-
-
-def _credit_mix_score(customer) -> tuple[float, str, Dict[str, Any]]:
-    """
-    Credit Mix (10% weight).
-    Rewards having diverse types of credit.
-    """
-    account_types = 0
-    type_details = []
-
-    if customer.mortgage_balance > 0 or customer.property_value > 0:
-        account_types += 1
-        type_details.append("mortgage")
-    if customer.auto_loan_balance > 0 or customer.vehicle_value > 0:
-        account_types += 1
-        type_details.append("auto loan")
-    if customer.student_loan_balance > 0:
-        account_types += 1
-        type_details.append("student loan")
-    if customer.credit_card_balance > 0 or customer.total_credit_limit > 0:
-        account_types += 1
-        type_details.append("revolving credit")
-    if customer.other_debt > 0:
-        account_types += 1
-        type_details.append("other installment")
-
-    if account_types == 0:
-        raw_score = 20.0
-        explanation = "No identifiable credit mix."
-    elif account_types == 1:
-        raw_score = 45.0
-        explanation = f"Limited mix: only {type_details[0]}."
-    elif account_types == 2:
-        raw_score = 65.0
-        explanation = f"Moderate mix: {' and '.join(type_details)}."
-    elif account_types == 3:
-        raw_score = 82.0
-        explanation = f"Good mix: {', '.join(type_details)}."
-    else:
-        raw_score = 95.0
-        explanation = f"Excellent mix: {', '.join(type_details)}."
-
-    breakdown = {
-        "account_types_count": account_types,
-        "account_types": type_details,
-        "factor_score": round(raw_score, 2),
-    }
-    return raw_score, explanation, breakdown
-
-
-def _new_credit_score(customer) -> tuple[float, str, Dict[str, Any]]:
-    """
-    New Credit / Inquiries (10% weight).
-    Penalizes recent hard inquiries.
-    """
-    inquiries_6m = customer.hard_inquiries_6m
-    inquiries_12m = customer.hard_inquiries_12m
-
-    # 6-month inquiries are more penalizing
-    penalty = inquiries_6m * 8.0 + max(0, inquiries_12m - inquiries_6m) * 4.0
-    raw_score = max(0.0, 100.0 - penalty)
-
-    if inquiries_6m == 0 and inquiries_12m == 0:
-        explanation = "No recent hard inquiries. Optimal."
-    elif inquiries_6m <= 1:
-        explanation = f"Minimal recent inquiries ({inquiries_6m} in 6 months). Minor impact."
-    elif inquiries_6m <= 3:
-        explanation = f"Moderate inquiry activity ({inquiries_6m} in 6 months). Some negative impact."
-    else:
-        explanation = f"High inquiry activity ({inquiries_6m} in 6 months, {inquiries_12m} in 12 months). Significant negative impact."
-
-    breakdown = {
-        "hard_inquiries_6m": inquiries_6m,
-        "hard_inquiries_12m": inquiries_12m,
-        "penalty_points": round(penalty, 2),
-        "factor_score": round(raw_score, 2),
-    }
-    return raw_score, explanation, breakdown
-
-
-def _score_to_grade(score: int) -> tuple[str, str]:
-    """Convert numeric score to letter grade and label."""
-    if score >= 750:
-        return "A", "Excellent"
-    elif score >= 700:
-        return "B", "Good"
-    elif score >= 650:
-        return "C", "Fair"
-    elif score >= 600:
-        return "D", "Poor"
-    elif score >= 550:
-        return "E", "Very Poor"
-    return "F", "Extremely Poor"
-
-
-def _generate_recommendations(customer, breakdown: Dict[str, Any]) -> List[str]:
-    """Generate actionable improvement recommendations."""
-    recs = []
-
-    util = breakdown.get("utilization", {}).get("utilization_ratio", 0)
-    if util > 0.30:
-        recs.append(
-            f"Reduce credit card balances. Current utilization ({util*100:.0f}%) exceeds the "
-            "recommended 30% threshold."
-        )
-
-    if customer.late_payments_30d + customer.late_payments_60d + customer.late_payments_90d > 0:
-        recs.append("Set up automatic payments to avoid future late payments.")
-
-    if customer.credit_history_years < 3:
-        recs.append(
-            "Build credit history over time. Avoid closing old accounts to maintain account age."
-        )
-
-    if customer.hard_inquiries_6m > 2:
-        recs.append("Limit new credit applications. Multiple inquiries in a short period lower your score.")
-
-    if customer.num_open_accounts < 2:
-        recs.append(
-            "Consider diversifying credit types (e.g., a small installment loan alongside revolving credit)."
-        )
-
-    if customer.collections > 0:
-        recs.append(
-            "Address outstanding collection accounts — negotiate pay-for-delete or settle accounts."
-        )
-
-    if not recs:
-        recs.append("Your credit profile is strong. Continue maintaining current habits.")
-
-    return recs
-
-
-def calculate_base_credit_score(customer) -> Dict[str, Any]:
-    """
-    Calculate a FICO-like credit score for a customer.
-
-    Weights:
-      - Payment History: 35%
-      - Credit Utilization: 30%
-      - Credit History Length: 15%
-      - Credit Mix: 10%
-      - New Credit: 10%
-
-    Returns a dict matching CreditScoreResponse schema.
-    """
-    ph_score, ph_expl, ph_breakdown = _payment_history_score(customer)
-    util_score, util_expl, util_breakdown = _utilization_score(customer)
-    age_score, age_expl, age_breakdown = _credit_age_score(customer)
-    mix_score, mix_expl, mix_breakdown = _credit_mix_score(customer)
-    new_score, new_expl, new_breakdown = _new_credit_score(customer)
-
-    # Weighted composite (0-100)
-    weighted = (
-        ph_score * 0.35
-        + util_score * 0.30
-        + age_score * 0.15
+    # Weighted composite (0-100 scale)
+    composite = (
+        payment_score * 0.35
+        + amounts_score * 0.30
+        + history_score * 0.15
+        + new_credit_score * 0.10
         + mix_score * 0.10
-        + new_score * 0.10
     )
 
-    # Scale to 300-850
-    score = int(round(300 + weighted / 100 * 550))
+    # Map to 300-850 range
+    score = int(300 + (composite / 100) * 550)
     score = max(300, min(850, score))
 
-    grade, grade_label = _score_to_grade(score)
-
-    breakdown = {
-        "payment_history": ph_breakdown,
-        "utilization": util_breakdown,
-        "credit_age": age_breakdown,
-        "credit_mix": mix_breakdown,
-        "new_credit": new_breakdown,
-        "weighted_composite": round(weighted, 2),
-    }
-
-    recommendations = _generate_recommendations(customer, breakdown)
+    grade = _score_to_grade(score)
+    factors = _identify_factors(customer, payment_score, amounts_score, history_score, new_credit_score, mix_score)
 
     return {
-        "customer_id": customer.id,
         "score": score,
         "grade": grade,
-        "grade_label": grade_label,
-        "payment_history_score": round(ph_score, 2),
-        "credit_utilization_score": round(util_score, 2),
-        "credit_age_score": round(age_score, 2),
-        "credit_mix_score": round(mix_score, 2),
-        "new_credit_score": round(new_score, 2),
-        "payment_history_weight": 35.0,
-        "credit_utilization_weight": 30.0,
-        "credit_age_weight": 15.0,
-        "credit_mix_weight": 10.0,
-        "new_credit_weight": 10.0,
-        "factors": {
-            "payment_history": ph_expl,
-            "credit_utilization": util_expl,
-            "credit_history_length": age_expl,
-            "credit_mix": mix_expl,
-            "new_credit": new_expl,
+        "factors": factors,
+        "breakdown": {
+            "payment_history": round(payment_score, 1),
+            "amounts_owed": round(amounts_score, 1),
+            "length_of_history": round(history_score, 1),
+            "new_credit": round(new_credit_score, 1),
+            "credit_mix": round(mix_score, 1),
         },
-        "breakdown": breakdown,
-        "recommendations": recommendations,
     }
+
+
+def _score_payment_history(customer) -> float:
+    """Score payment history (0-100). Higher = better."""
+    score = 100.0
+
+    # Late payments in last 12 months (most impactful)
+    late_12m = customer.num_late_payments_12m
+    if late_12m >= 6:
+        score -= 50
+    elif late_12m >= 3:
+        score -= 35
+    elif late_12m >= 1:
+        score -= 15
+
+    # Late payments in 12-24 month window (less impactful)
+    late_older = customer.num_late_payments_24m - customer.num_late_payments_12m
+    if late_older >= 4:
+        score -= 15
+    elif late_older >= 2:
+        score -= 8
+
+    # Defaults
+    if customer.num_defaults >= 3:
+        score -= 30
+    elif customer.num_defaults >= 1:
+        score -= 20
+
+    # Bankruptcies (severe)
+    if customer.num_bankruptcies >= 2:
+        score -= 40
+    elif customer.num_bankruptcies >= 1:
+        score -= 25
+
+    # Collections
+    if customer.num_collections >= 3:
+        score -= 20
+    elif customer.num_collections >= 1:
+        score -= 10
+
+    return max(0, score)
+
+
+def _score_amounts_owed(customer) -> float:
+    """Score amounts owed / utilization (0-100)."""
+    score = 100.0
+
+    # Credit utilization ratio
+    if customer.total_credit_limit > 0:
+        utilization = customer.total_credit_used / customer.total_credit_limit
+    else:
+        utilization = 0
+
+    if utilization > 0.90:
+        score -= 50
+    elif utilization > 0.75:
+        score -= 35
+    elif utilization > 0.50:
+        score -= 20
+    elif utilization > 0.30:
+        score -= 10
+    elif utilization > 0.10:
+        score -= 0  # Ideal range
+    elif utilization == 0:
+        score -= 5  # No utilization can be slightly negative
+
+    # Total debt burden relative to income
+    if customer.annual_income > 0:
+        total_debt = (
+            customer.mortgage_balance
+            + customer.auto_loan_balance
+            + customer.student_loan_balance
+            + customer.total_revolving_debt
+        )
+        debt_to_income = total_debt / customer.annual_income
+        if debt_to_income > 5:
+            score -= 25
+        elif debt_to_income > 3:
+            score -= 15
+        elif debt_to_income > 1.5:
+            score -= 5
+
+    return max(0, score)
+
+
+def _score_history_length(customer) -> float:
+    """Score length of credit history (0-100)."""
+    years = customer.credit_history_years
+    if years >= 20:
+        return 100
+    if years >= 15:
+        return 90
+    if years >= 10:
+        return 75
+    if years >= 7:
+        return 60
+    if years >= 5:
+        return 45
+    if years >= 3:
+        return 30
+    if years >= 1:
+        return 15
+    return 5
+
+
+def _score_new_credit(customer) -> float:
+    """Score new credit inquiries (0-100). Fewer inquiries = better."""
+    score = 100.0
+
+    inq_6m = customer.num_hard_inquiries_6m
+    if inq_6m >= 6:
+        score -= 40
+    elif inq_6m >= 4:
+        score -= 25
+    elif inq_6m >= 2:
+        score -= 10
+    elif inq_6m == 1:
+        score -= 5
+
+    # Additional older inquiries
+    inq_older = customer.num_hard_inquiries_12m - customer.num_hard_inquiries_6m
+    if inq_older >= 4:
+        score -= 10
+    elif inq_older >= 2:
+        score -= 5
+
+    return max(0, score)
+
+
+def _score_credit_mix(customer) -> float:
+    """Score credit mix variety (0-100)."""
+    types = 0
+    if customer.num_credit_cards > 0:
+        types += 1
+    if customer.has_mortgage:
+        types += 1
+    if customer.has_auto_loan:
+        types += 1
+    if customer.has_student_loan:
+        types += 1
+    if customer.num_open_accounts > customer.num_credit_cards:
+        types += 1  # Has non-card accounts (installment loans, etc.)
+
+    if types >= 4:
+        return 100
+    if types == 3:
+        return 80
+    if types == 2:
+        return 60
+    if types == 1:
+        return 35
+    return 10
+
+
+def _score_to_grade(score: int) -> str:
+    """Convert numeric score to letter grade."""
+    if score >= 750:
+        return "A"
+    if score >= 700:
+        return "B"
+    if score >= 650:
+        return "C"
+    if score >= 600:
+        return "D"
+    if score >= 550:
+        return "E"
+    return "F"
+
+
+def _identify_factors(customer, payment, amounts, history, new_credit, mix) -> list[str]:
+    """Identify key positive and negative factors."""
+    factors = []
+
+    # Negative factors (sorted by impact)
+    if payment < 50:
+        factors.append("Significant delinquency history")
+    elif payment < 75:
+        factors.append("Recent late payments impacting score")
+
+    if amounts < 50:
+        factors.append("Very high credit utilization")
+    elif amounts < 75:
+        factors.append("Credit utilization above optimal range")
+
+    if history < 40:
+        factors.append("Short credit history")
+
+    if new_credit < 60:
+        factors.append("Too many recent credit inquiries")
+
+    if mix < 50:
+        factors.append("Limited credit mix")
+
+    if customer.num_bankruptcies > 0:
+        factors.append("Bankruptcy on record")
+
+    if customer.num_collections > 0:
+        factors.append("Accounts in collections")
+
+    # Positive factors
+    if payment >= 90:
+        factors.append("Excellent payment history")
+    if amounts >= 85:
+        factors.append("Low credit utilization")
+    if history >= 80:
+        factors.append("Long established credit history")
+    if customer.num_late_payments_12m == 0:
+        factors.append("No recent late payments")
+
+    return factors

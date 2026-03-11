@@ -1,280 +1,163 @@
 """
-Chat router: REST and WebSocket endpoints for the CreditScope agent.
+WebSocket + REST chat endpoints for CreditScope.
 """
-import asyncio
+
+from __future__ import annotations
+
 import json
-import time
 import uuid
-from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, WebSocket, WebSocketDisconnect
-from fastapi.responses import StreamingResponse
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
-from sqlalchemy.ext.asyncio import AsyncSession
 
-router = APIRouter(prefix="/chat", tags=["chat"])
+from backend.agent.orchestrator import CreditScopeAgent
+from backend.schemas.thinking import CoTConfig
 
-# In-memory session store
-_sessions: Dict[str, Dict[str, Any]] = {}
+router = APIRouter()
+
+# Shared agent instance
+_agent: CreditScopeAgent | None = None
+
+
+def get_agent() -> CreditScopeAgent:
+    global _agent
+    if _agent is None:
+        _agent = CreditScopeAgent()
+    return _agent
 
 
 class ChatRequest(BaseModel):
     message: str
-    session_id: Optional[str] = None
-    cot_config: Optional[Dict[str, Any]] = None
-    stream: bool = False
+    images: list[str] | None = None  # base64 encoded
+    session_id: str | None = None
+    cot_config: CoTConfig | None = None
+
+
+class ThinkingResponse(BaseModel):
+    content: str | None = None
+    tokens_used: int = 0
+    budget: int = 2048
+    budget_utilization_pct: float = 0.0
+    was_budget_enforced: bool = False
+    duration_ms: float = 0.0
 
 
 class ChatResponse(BaseModel):
-    session_id: str
     answer: str
-    execution_trace: List[Dict[str, Any]] = []
-    moe_traces: Optional[Dict[str, Any]] = None
-    tokens_used: Dict[str, int] = {}
-    thinking: Optional[Dict[str, Any]] = None
-    total_duration_ms: float = 0.0
+    thinking: ThinkingResponse | None = None
+    execution_trace: list[dict] = []
+    moe_trace: dict | None = None
+    tokens: dict = {}
+    session_id: str = ""
+    request_id: str = ""
 
 
-def get_agent():
-    """Get or create the CreditScope agent singleton."""
-    import sys
-    import os
-    sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-
-    from main import SessionFactory
-    from agent.orchestrator import CreditScopeAgent
-
-    return CreditScopeAgent(
-        sglang_url=os.environ.get("SGLANG_SERVER_URL", "http://localhost:8000"),
-        sidecar_url=os.environ.get("SIDECAR_URL", "http://localhost:8001"),
-        session_factory=SessionFactory,
-    )
-
-
-def _parse_cot_config(cot_dict: Optional[Dict[str, Any]]):
-    """Parse CoT config from request dict."""
-    if not cot_dict:
-        return None
-    from schemas.thinking import CoTConfig
-    return CoTConfig(**cot_dict)
-
-
-@router.post("", response_model=ChatResponse)
-async def chat(request: ChatRequest):
-    """
-    Send a message to the CreditScope agent.
-    Returns the complete response (non-streaming).
-    """
-    session_id = request.session_id or str(uuid.uuid4())
-    cot_config = _parse_cot_config(request.cot_config)
-
+@router.post("/chat", response_model=ChatResponse)
+async def chat_endpoint(request: ChatRequest):
+    """Process a chat message through the agent."""
     agent = get_agent()
-    try:
-        result = await agent.process_query(
-            query=request.message,
-            session_id=session_id,
-            cot_config=cot_config,
-        )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Agent error: {str(e)}")
 
-    # Store session history
-    if session_id not in _sessions:
-        _sessions[session_id] = {"messages": [], "created_at": time.time()}
+    # Decode images if provided
+    images = None
+    if request.images:
+        import base64
+        images = [base64.b64decode(img) for img in request.images]
 
-    _sessions[session_id]["messages"].append(
-        {"role": "user", "content": request.message, "ts": time.time()}
+    result = await agent.process_query(
+        query=request.message,
+        images=images,
+        cot_config=request.cot_config,
+        session_id=request.session_id,
     )
-    _sessions[session_id]["messages"].append(
-        {
-            "role": "assistant",
-            "content": result.answer,
-            "ts": time.time(),
-            "trace": [s.dict() for s in result.execution_trace],
-        }
-    )
+
+    thinking_resp = None
+    if result.thinking:
+        thinking_resp = ThinkingResponse(**result.thinking)
 
     return ChatResponse(
-        session_id=session_id,
         answer=result.answer,
-        execution_trace=[s.dict() for s in result.execution_trace],
-        moe_traces=result.moe_traces,
-        tokens_used=result.tokens_used,
-        thinking=result.thinking,
-        total_duration_ms=result.total_duration_ms,
+        thinking=thinking_resp,
+        execution_trace=result.execution_trace,
+        moe_trace=result.moe_traces,
+        tokens=result.tokens,
+        session_id=result.session_id,
+        request_id=result.request_id,
     )
 
 
-@router.post("/stream")
-async def chat_stream(request: ChatRequest):
-    """
-    Send a message to the CreditScope agent with streaming response.
-    Returns a Server-Sent Events stream.
-    """
-    session_id = request.session_id or str(uuid.uuid4())
-    cot_config = _parse_cot_config(request.cot_config)
-    agent = get_agent()
-
-    async def event_generator():
-        try:
-            # Initial metadata
-            yield f"data: {json.dumps({'type': 'session_start', 'session_id': session_id})}\n\n"
-
-            # Stream from agent
-            messages_so_far = []
-            system_content = ""
-
-            from agent.prompts import TOOLS, SYSTEM_PROMPT
-            from datetime import date
-            import os
-
-            system_content = SYSTEM_PROMPT.format(
-                current_date=date.today().isoformat(),
-                institution_name=os.environ.get("INSTITUTION_NAME", "CreditScope Bank"),
-            )
-            messages_so_far = [
-                {"role": "system", "content": system_content},
-                {"role": "user", "content": request.message},
-            ]
-
-            cot_params = {}
-            if cot_config:
-                from inference.cot_controller import CoTController
-                cot_params = CoTController.build_request_params(cot_config)
-
-            async for event in agent.call_model_streaming(
-                messages=messages_so_far,
-                tools=TOOLS,
-                **cot_params,
-            ):
-                yield f"data: {json.dumps(event)}\n\n"
-                await asyncio.sleep(0)  # yield control
-
-            yield f"data: {json.dumps({'type': 'done', 'session_id': session_id})}\n\n"
-
-        except Exception as e:
-            yield f"data: {json.dumps({'type': 'error', 'error': str(e)})}\n\n"
-
-    return StreamingResponse(
-        event_generator(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "X-Accel-Buffering": "no",
-            "Connection": "keep-alive",
-        },
-    )
-
-
-@router.websocket("/ws")
+@router.websocket("/chat/ws")
 async def chat_websocket(websocket: WebSocket):
-    """
-    WebSocket endpoint for the CreditScope chat.
-
-    Message types from client:
-      - {type: "message", content: str, session_id: str, cot_config: {}}
-      - {type: "ping"}
-
-    Message types from server:
-      - {type: "thinking_start"}
-      - {type: "thinking_delta", content: str}
-      - {type: "thinking_end", tokens_used: int, duration_ms: float}
-      - {type: "response_start"}
-      - {type: "response_delta", content: str}
-      - {type: "response_end", full_response: str}
-      - {type: "tool_call", tool_name: str, tool_input: {}}
-      - {type: "tool_result", tool_name: str, result: {}}
-      - {type: "done", session_id: str}
-      - {type: "error", error: str}
-      - {type: "pong"}
-    """
+    """WebSocket endpoint for streaming chat responses."""
     await websocket.accept()
-    session_id = str(uuid.uuid4())
     agent = get_agent()
+    session_id = str(uuid.uuid4())
 
     try:
         while True:
-            raw = await websocket.receive_text()
+            data = await websocket.receive_text()
             try:
-                msg = json.loads(raw)
+                msg = json.loads(data)
             except json.JSONDecodeError:
-                await websocket.send_text(
-                    json.dumps({"type": "error", "error": "Invalid JSON"})
-                )
-                continue
+                msg = {"message": data}
 
-            msg_type = msg.get("type", "message")
+            query = msg.get("message", "")
+            cot_config = None
+            if "cot_config" in msg:
+                cot_config = CoTConfig(**msg["cot_config"])
 
-            if msg_type == "ping":
-                await websocket.send_text(json.dumps({"type": "pong"}))
-                continue
+            # Send thinking_start event
+            await websocket.send_json({
+                "type": "thinking_start",
+                "session_id": session_id,
+            })
 
-            if msg_type != "message":
-                continue
-
-            content = msg.get("content", "")
-            session_id = msg.get("session_id", session_id)
-            cot_dict = msg.get("cot_config")
-            cot_config = _parse_cot_config(cot_dict)
-
-            from agent.prompts import TOOLS, SYSTEM_PROMPT
-            from datetime import date
-            import os
-
-            system_content = SYSTEM_PROMPT.format(
-                current_date=date.today().isoformat(),
-                institution_name=os.environ.get("INSTITUTION_NAME", "CreditScope Bank"),
+            result = await agent.process_query(
+                query=query,
+                cot_config=cot_config,
+                session_id=session_id,
             )
 
-            cot_params = {}
-            if cot_config:
-                from inference.cot_controller import CoTController
-                cot_params = CoTController.build_request_params(cot_config)
+            # Send thinking content if available
+            if result.thinking and result.thinking.get("content"):
+                await websocket.send_json({
+                    "type": "thinking_end",
+                    "stats": result.thinking,
+                })
 
-            messages = [
-                {"role": "system", "content": system_content},
-                {"role": "user", "content": content},
-            ]
+            # Send tool execution traces
+            for trace in result.execution_trace:
+                await websocket.send_json({
+                    "type": "tool_execution",
+                    "data": trace,
+                })
 
-            try:
-                async for event in agent.call_model_streaming(
-                    messages=messages,
-                    tools=TOOLS,
-                    **cot_params,
-                ):
-                    event_str = json.dumps({**event, "session_id": session_id})
-                    await websocket.send_text(event_str)
+            # Send response start
+            await websocket.send_json({
+                "type": "response_start",
+            })
 
-                # Send completion
-                await websocket.send_text(
-                    json.dumps({"type": "done", "session_id": session_id})
-                )
+            # Stream response in chunks
+            answer = result.answer
+            chunk_size = 50
+            for i in range(0, len(answer), chunk_size):
+                await websocket.send_json({
+                    "type": "response_delta",
+                    "content": answer[i:i + chunk_size],
+                })
 
-            except Exception as e:
-                await websocket.send_text(
-                    json.dumps({"type": "error", "error": str(e), "session_id": session_id})
-                )
+            # Send response end with full data
+            await websocket.send_json({
+                "type": "response_end",
+                "data": {
+                    "answer": result.answer,
+                    "thinking": result.thinking,
+                    "execution_trace": result.execution_trace,
+                    "moe_trace": result.moe_traces,
+                    "tokens": result.tokens,
+                    "session_id": result.session_id,
+                    "request_id": result.request_id,
+                },
+            })
 
     except WebSocketDisconnect:
         pass
-    except Exception as e:
-        try:
-            await websocket.send_text(json.dumps({"type": "error", "error": str(e)}))
-        except Exception:
-            pass
-
-
-@router.get("/sessions/{session_id}")
-async def get_session_history(session_id: str):
-    """Get the message history for a session."""
-    session = _sessions.get(session_id)
-    if not session:
-        raise HTTPException(status_code=404, detail="Session not found")
-    return session
-
-
-@router.delete("/sessions/{session_id}")
-async def clear_session(session_id: str):
-    """Clear session history."""
-    _sessions.pop(session_id, None)
-    return {"status": "cleared", "session_id": session_id}

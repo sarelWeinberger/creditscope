@@ -1,206 +1,204 @@
 """
-Risk-weighted composite credit scoring.
-Combines all tool outputs into a final risk assessment.
+Combined risk weighting tool.
+
+Final composite scoring that combines all tool outputs into a risk grade:
+- A  (750-850): Excellent — automatic approval recommended
+- B  (700-749): Good — standard approval
+- C  (650-699): Fair — approval with conditions
+- D  (600-649): Below Average — requires senior review
+- E  (550-599): Poor — likely decline
+- F  (300-549): Very Poor — decline
 """
-from typing import Any, Dict, List, Optional
 
-from tools.credit_score import calculate_base_credit_score, _score_to_grade
-from tools.debt_to_income import calculate_dti_ratio
-from tools.payment_history import analyze_payment_history
-
-
-RISK_GRADE_THRESHOLDS = {
-    "A": 750,
-    "B": 700,
-    "C": 650,
-    "D": 600,
-    "E": 550,
-    "F": 0,
-}
-
-GRADE_LABELS = {
-    "A": "Prime — Excellent creditworthiness",
-    "B": "Near Prime — Good credit standing",
-    "C": "Subprime — Fair credit; elevated risk",
-    "D": "Deep Subprime — Poor credit; high risk",
-    "E": "Very High Risk — Significant concerns",
-    "F": "Extremely High Risk — Decline recommended",
-}
-
-RECOMMENDATIONS = {
-    "A": "Approve — Low risk. Standard rate terms recommended.",
-    "B": "Approve — Acceptable risk. Minor rate premium may apply.",
-    "C": "Conditional Approval — Review compensating factors. Higher rate tier.",
-    "D": "Review Required — Significant risk. Collateral or co-signer recommended.",
-    "E": "Decline or Hold — Risk exceeds standard thresholds. Exceptional circumstances only.",
-    "F": "Decline — Risk profile does not meet lending criteria.",
-}
+from backend.tools.credit_score import calculate_base_credit_score
+from backend.tools.debt_to_income import calculate_dti_ratio
+from backend.tools.payment_history import analyze_payment_history
 
 
-def _grade_from_score(score: float) -> str:
-    """Return grade letter for a composite risk score."""
-    for grade, threshold in RISK_GRADE_THRESHOLDS.items():
-        if score >= threshold:
-            return grade
-    return "F"
-
-
-def _identify_risk_factors(customer, base_result: Dict, dti_result: Dict, payment_result: Dict) -> List[str]:
-    """Identify the top negative risk factors."""
-    factors = []
-
-    # Payment history
-    if customer.bankruptcies > 0:
-        factors.append(f"Bankruptcy on record ({customer.bankruptcies} filing(s))")
-    if customer.foreclosures > 0:
-        factors.append(f"Foreclosure on record ({customer.foreclosures} event(s))")
-    if customer.collections > 0:
-        factors.append(f"Active collection accounts ({customer.collections})")
-    if customer.charge_offs > 0:
-        factors.append(f"Charged-off accounts ({customer.charge_offs})")
-    if customer.late_payments_90d > 0:
-        factors.append(f"90-day late payments ({customer.late_payments_90d})")
-    if customer.late_payments_60d > 2:
-        factors.append(f"Multiple 60-day late payments ({customer.late_payments_60d})")
-
-    # Utilization
-    util = customer.total_credit_used / max(customer.total_credit_limit, 1)
-    if util > 0.75:
-        factors.append(f"Very high credit utilization ({util*100:.0f}%)")
-    elif util > 0.50:
-        factors.append(f"High credit utilization ({util*100:.0f}%)")
-
-    # DTI
-    combined_dti = dti_result.get("combined_dti", 0)
-    if combined_dti > 0.50:
-        factors.append(f"Excessive debt-to-income ratio ({combined_dti*100:.1f}%)")
-    elif combined_dti > 0.43:
-        factors.append(f"High debt-to-income ratio ({combined_dti*100:.1f}%)")
-
-    # Credit history
-    if customer.credit_history_years < 1:
-        factors.append("Very limited credit history (< 1 year)")
-
-    # Inquiries
-    if customer.hard_inquiries_6m > 4:
-        factors.append(f"High inquiry volume ({customer.hard_inquiries_6m} in 6 months)")
-
-    return factors[:5]  # Top 5
-
-
-def _identify_positive_factors(customer, base_result: Dict) -> List[str]:
-    """Identify positive credit factors."""
-    positives = []
-
-    if customer.on_time_payments > 50 and customer.late_payments_30d == 0:
-        positives.append(f"Strong on-time payment record ({customer.on_time_payments} payments)")
-
-    util = customer.total_credit_used / max(customer.total_credit_limit, 1)
-    if util <= 0.20:
-        positives.append(f"Excellent credit utilization ({util*100:.0f}%)")
-
-    if customer.credit_history_years >= 10:
-        positives.append(f"Long credit history ({customer.credit_history_years:.0f} years)")
-
-    if customer.savings_balance + customer.investment_balance > customer.annual_income:
-        positives.append("Strong savings and investment reserves")
-
-    monthly_income = customer.monthly_income or 1
-    dti = customer.monthly_debt_payments / monthly_income
-    if dti <= 0.28:
-        positives.append(f"Low current debt-to-income ratio ({dti*100:.1f}%)")
-
-    if customer.num_credit_accounts >= 5 and customer.bankruptcies == 0:
-        positives.append(f"Diverse credit portfolio ({customer.num_credit_accounts} accounts)")
-
-    if customer.hard_inquiries_6m == 0:
-        positives.append("No recent hard inquiries")
-
-    return positives[:5]  # Top 5
-
-
-def compute_risk_weighted_score(customer, loan_application=None) -> Dict[str, Any]:
+def compute_risk_weighted_score(customer, loan_application=None) -> dict:
     """
-    Compute a comprehensive risk-weighted credit score.
+    Compute final composite risk score combining all factors.
 
-    Combines:
-      - Base FICO-like score (primary)
-      - DTI ratio assessment
-      - Payment history analysis
-      - Loan-specific adjustments (if loan_application provided)
-
-    Risk grade thresholds:
-      A: 750+, B: 700-749, C: 650-699, D: 600-649, E: 550-599, F: <550
+    Args:
+        customer: Customer ORM object
+        loan_application: Optional LoanApplication ORM object
 
     Returns:
-        dict matching RiskWeightedResponse schema
+        Composite risk assessment
     """
-    base_result = calculate_base_credit_score(customer)
+    # Component scores
+    credit_result = calculate_base_credit_score(customer)
     dti_result = calculate_dti_ratio(customer)
     payment_result = analyze_payment_history(customer)
 
-    base_score = base_result["score"]
+    base_score = credit_result["score"]
+    payment_severity = payment_result["severity_score"]
+    current_dti = dti_result.get("current_dti") or 0
 
-    # Factor contributions (as points)
-    ph_contribution = base_result["payment_history_score"] * 0.35 / 100 * 550
-    util_contribution = base_result["credit_utilization_score"] * 0.30 / 100 * 550
-    age_contribution = base_result["credit_age_score"] * 0.15 / 100 * 550
-    mix_contribution = base_result["credit_mix_score"] * 0.10 / 100 * 550
-    new_contribution = base_result["new_credit_score"] * 0.10 / 100 * 550
+    # Normalize components to 0-100
+    credit_component = (base_score - 300) / 550 * 100  # 0-100
+    payment_component = 100 - payment_severity            # 0-100 (inverted)
+    dti_component = max(0, 100 - current_dti * 200)       # 0-100
 
-    # Penalty adjustments
-    dti_penalty = 0.0
-    combined_dti = dti_result["combined_dti"]
-    if combined_dti > 0.50:
-        dti_penalty = -30.0
-    elif combined_dti > 0.43:
-        dti_penalty = -15.0
-    elif combined_dti > 0.36:
-        dti_penalty = -5.0
+    # If loan application provided, factor in loan-specific risk
+    loan_component = 50  # neutral default
+    if loan_application:
+        loan_component = _score_loan_application(customer, loan_application)
 
-    # Severity penalty from payment history
-    severity_penalty = min(50.0, payment_result["severity_score"] * 0.5)
-
-    risk_score = max(300.0, min(850.0, base_score + dti_penalty - severity_penalty * 0.3))
-
-    risk_grade = _grade_from_score(risk_score)
-    grade_label = GRADE_LABELS[risk_grade]
-    recommendation = RECOMMENDATIONS[risk_grade]
-
-    key_risks = _identify_risk_factors(customer, base_result, dti_result, payment_result)
-    positives = _identify_positive_factors(customer, base_result)
-
-    breakdown = {
-        "base_score": base_score,
-        "risk_score": round(risk_score, 1),
-        "dti_penalty": round(dti_penalty, 2),
-        "severity_penalty": round(severity_penalty * 0.3, 2),
-        "combined_dti": dti_result["combined_dti"],
-        "payment_on_time_rate": payment_result["on_time_rate"],
-        "severity_score": payment_result["severity_score"],
-        "delinquency_trend": payment_result["trend"],
-        "factor_scores": {
-            "payment_history": base_result["payment_history_score"],
-            "credit_utilization": base_result["credit_utilization_score"],
-            "credit_age": base_result["credit_age_score"],
-            "credit_mix": base_result["credit_mix_score"],
-            "new_credit": base_result["new_credit_score"],
-        },
+    # Weighted composite
+    weights = {
+        "credit_score": 0.35,
+        "payment_history": 0.25,
+        "dti": 0.20,
+        "loan_specific": 0.20,
     }
+
+    composite = (
+        credit_component * weights["credit_score"]
+        + payment_component * weights["payment_history"]
+        + dti_component * weights["dti"]
+        + loan_component * weights["loan_specific"]
+    )
+
+    # Map back to 300-850
+    final_score = int(300 + (composite / 100) * 550)
+    final_score = max(300, min(850, final_score))
+
+    grade = _score_to_grade(final_score)
+    confidence = _calculate_confidence(customer)
+    risk_factors = _compile_risk_factors(credit_result, dti_result, payment_result, loan_application)
+    recommendation = _generate_recommendation(grade, risk_factors)
 
     return {
-        "customer_id": customer.id,
-        "base_score": base_score,
-        "payment_history_contribution": round(ph_contribution, 2),
-        "utilization_contribution": round(util_contribution, 2),
-        "credit_age_contribution": round(age_contribution, 2),
-        "credit_mix_contribution": round(mix_contribution, 2),
-        "new_credit_contribution": round(new_contribution, 2),
-        "risk_score": round(risk_score, 1),
-        "risk_grade": risk_grade,
-        "risk_label": grade_label,
+        "composite_score": final_score,
+        "risk_grade": grade,
+        "component_scores": {
+            "credit_score": round(credit_component, 1),
+            "payment_history": round(payment_component, 1),
+            "debt_to_income": round(dti_component, 1),
+            "loan_specific": round(loan_component, 1),
+        },
+        "risk_factors": risk_factors,
         "recommendation": recommendation,
-        "breakdown": breakdown,
-        "key_risk_factors": key_risks,
-        "positive_factors": positives,
+        "confidence": round(confidence, 2),
+        "base_credit_score": base_score,
+        "dti_ratio": current_dti,
+        "payment_severity": payment_severity,
     }
+
+
+def _score_loan_application(customer, loan) -> float:
+    """Score the loan application characteristics (0-100)."""
+    score = 50.0  # Start at neutral
+
+    # Amount relative to income
+    if customer.annual_income > 0:
+        income_ratio = loan.requested_amount / customer.annual_income
+        if income_ratio < 1:
+            score += 15
+        elif income_ratio < 3:
+            score += 5
+        elif income_ratio > 10:
+            score -= 20
+        elif income_ratio > 5:
+            score -= 10
+
+    # Collateral
+    if loan.collateral_value and loan.collateral_value > 0:
+        ltv = loan.requested_amount / loan.collateral_value
+        if ltv < 0.8:
+            score += 15
+        elif ltv > 1.0:
+            score -= 15
+    else:
+        score -= 10  # Unsecured
+
+    # Term risk
+    if loan.proposed_term_months < 36:
+        score += 5
+    elif loan.proposed_term_months > 120:
+        score -= 10
+
+    # Loan type risk
+    type_adjustments = {
+        "student": 5,
+        "mortgage": 0,
+        "auto": -5,
+        "personal": -10,
+        "business": -15,
+    }
+    score += type_adjustments.get(loan.loan_type, 0)
+
+    return max(0, min(100, score))
+
+
+def _score_to_grade(score: int) -> str:
+    if score >= 750:
+        return "A"
+    if score >= 700:
+        return "B"
+    if score >= 650:
+        return "C"
+    if score >= 600:
+        return "D"
+    if score >= 550:
+        return "E"
+    return "F"
+
+
+def _calculate_confidence(customer) -> float:
+    """Calculate confidence in the assessment (0-1)."""
+    confidence = 0.5
+
+    # More data = higher confidence
+    if customer.credit_history_years >= 5:
+        confidence += 0.15
+    if customer.credit_history_years >= 10:
+        confidence += 0.10
+
+    if customer.num_open_accounts >= 3:
+        confidence += 0.10
+
+    if customer.annual_income > 0:
+        confidence += 0.10
+
+    # Risk notes suggest manual review needed
+    if customer.risk_notes:
+        confidence -= 0.10
+
+    return max(0.1, min(1.0, confidence))
+
+
+def _compile_risk_factors(credit_result, dti_result, payment_result, loan=None) -> list[str]:
+    """Compile all risk factors from component analyses."""
+    factors = list(credit_result.get("factors", []))
+
+    dti_val = dti_result.get("current_dti")
+    if dti_val and dti_val > 0.43:
+        factors.append(f"DTI ratio exceeds conventional limit ({dti_val:.1%})")
+    elif dti_val and dti_val > 0.36:
+        factors.append(f"DTI ratio elevated ({dti_val:.1%})")
+
+    if payment_result["risk_level"] in ("high", "severe"):
+        factors.append(f"Payment history risk: {payment_result['risk_level']}")
+    if payment_result["delinquency_trend"] == "worsening":
+        factors.append("Worsening delinquency trend")
+
+    if loan:
+        if loan.collateral_type == "none" or not loan.collateral_value:
+            factors.append("Unsecured loan — no collateral")
+
+    return factors
+
+
+def _generate_recommendation(grade: str, risk_factors: list[str]) -> str:
+    """Generate recommendation based on grade and factors."""
+    recommendations = {
+        "A": "Excellent risk profile. Recommend automatic approval with best available terms.",
+        "B": "Good risk profile. Recommend standard approval.",
+        "C": "Fair risk profile. Recommend conditional approval — review risk factors before finalizing.",
+        "D": "Below average risk profile. Requires senior underwriter review before decision.",
+        "E": "Poor risk profile. Likely decline. Only proceed if strong compensating factors exist.",
+        "F": "Very poor risk profile. Recommend decline.",
+    }
+    return recommendations.get(grade, "Unable to determine recommendation.")
