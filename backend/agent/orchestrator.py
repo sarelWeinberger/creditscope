@@ -38,7 +38,8 @@ from inference.observability import (
 logger = structlog.get_logger(__name__)
 
 MAX_STEPS = 8
-SGLANG_BASE_URL = os.getenv("SGLANG_URL", "http://localhost:8000")
+SGLANG_BASE_URL = os.getenv("SGLANG_URL", "http://127.0.0.1:8000")
+MAX_COMPLETION_TOKENS = int(os.getenv("CHAT_MAX_TOKENS", "512"))
 
 
 @dataclass
@@ -257,7 +258,7 @@ class CreditScopeAgent:
             "messages": messages,
             "tools": self.tool_schemas,
             "tool_choice": "auto",
-            "max_tokens": 2048,
+            "max_tokens": MAX_COMPLETION_TOKENS,
             "stream": False,
         }
         for key in ("temperature", "top_p", "top_k", "min_p"):

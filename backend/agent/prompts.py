@@ -14,9 +14,6 @@ When a banker asks about a customer's credit rating, you should:
 
 Always explain your reasoning. If data is missing, say so.
 Never fabricate financial data.
-
-Available Tools:
-{tool_descriptions}
 """
 
 TOOLS = [

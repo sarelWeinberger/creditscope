@@ -14,7 +14,7 @@ from inference.moe_hooks import get_collector
 from inference.observability import get_metrics
 
 router = APIRouter()
-INFERENCE_BASE_URL = os.getenv("SGLANG_URL", "http://localhost:8000")
+INFERENCE_BASE_URL = os.getenv("SGLANG_URL", "http://127.0.0.1:8000")
 
 
 async def _try_inference_json(path: str, params: dict | None = None) -> dict | list | None:

@@ -100,6 +100,7 @@ fi
 
 # Ensure PYTHONPATH includes the project root so backend/inference modules resolve
 export PYTHONPATH="${PROJECT_ROOT}${PYTHONPATH:+:$PYTHONPATH}"
+export SGLANG_URL="${SGLANG_URL:-http://127.0.0.1:$INFERENCE_PORT}"
 
 # ── Start Inference ───────────────────────────────────────────────────────────
 if [ "$START_INFERENCE" = "true" ]; then
