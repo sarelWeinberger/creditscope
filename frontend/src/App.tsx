@@ -4,6 +4,93 @@ import ChatInterface from "./components/ChatInterface";
 import ObservabilityDash from "./components/ObservabilityDash";
 import { Customer, CoTConfig, ThinkingMode, ThinkingVisibility } from "./types";
 
+function toNumber(value: unknown, fallback = 0): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+}
+
+function deriveCreditGrade(score: number): string {
+  if (score >= 750) return "A";
+  if (score >= 700) return "B";
+  if (score >= 650) return "C";
+  if (score >= 600) return "D";
+  if (score >= 550) return "E";
+  return "F";
+}
+
+function normalizeCustomer(raw: Record<string, unknown>): Customer {
+  const annualIncome = toNumber(raw.annual_income);
+  const monthlyIncome = annualIncome > 0 ? annualIncome / 12 : 0;
+  const monthlyDebtPayments = toNumber(raw.monthly_debt_payments);
+  const totalCreditLimit = toNumber(raw.total_credit_limit);
+  const totalCreditUsed = toNumber(raw.total_credit_used);
+  const creditScore = toNumber(raw.credit_score, toNumber(raw.fico_score, 300));
+  const dtiRatio =
+    toNumber(raw.dti_ratio, monthlyIncome > 0 ? monthlyDebtPayments / monthlyIncome : 0);
+  const utilization =
+    toNumber(
+      raw.credit_utilization_ratio,
+      totalCreditLimit > 0 ? totalCreditUsed / totalCreditLimit : 0,
+    );
+
+  return {
+    id: toNumber(raw.id),
+    first_name: String(raw.first_name || ""),
+    last_name: String(raw.last_name || ""),
+    full_name: String(raw.full_name || "Unknown Customer"),
+    email: String(raw.email || ""),
+    phone: typeof raw.phone === "string" ? raw.phone : undefined,
+    date_of_birth: typeof raw.date_of_birth === "string" ? raw.date_of_birth : undefined,
+    ssn_last4: typeof raw.ssn_last4 === "string" ? raw.ssn_last4 : undefined,
+    address: typeof raw.address === "string" ? raw.address : undefined,
+    city: typeof raw.city === "string" ? raw.city : undefined,
+    state: typeof raw.state === "string" ? raw.state : undefined,
+    zip_code: typeof raw.zip_code === "string" ? raw.zip_code : undefined,
+    employment_status: (String(raw.employment_status || "employed") as Customer["employment_status"]),
+    employer_name: typeof raw.employer_name === "string" ? raw.employer_name : undefined,
+    annual_income: annualIncome,
+    monthly_income: toNumber(raw.monthly_income, monthlyIncome),
+    years_employed: toNumber(raw.years_employed, toNumber(raw.years_at_current_job)),
+    job_title: typeof raw.job_title === "string" ? raw.job_title : undefined,
+    credit_score: creditScore,
+    credit_history_years: toNumber(raw.credit_history_years),
+    num_credit_accounts: toNumber(raw.num_credit_accounts, toNumber(raw.num_credit_cards)),
+    num_open_accounts: toNumber(raw.num_open_accounts),
+    num_closed_accounts: toNumber(raw.num_closed_accounts),
+    total_credit_limit: totalCreditLimit,
+    total_credit_used: totalCreditUsed,
+    credit_utilization_ratio: utilization,
+    credit_grade: String(raw.credit_grade || deriveCreditGrade(creditScore)),
+    total_debt: toNumber(raw.total_debt, toNumber(raw.total_revolving_debt) + monthlyDebtPayments * 12),
+    monthly_debt_payments: monthlyDebtPayments,
+    mortgage_balance: toNumber(raw.mortgage_balance),
+    auto_loan_balance: toNumber(raw.auto_loan_balance),
+    student_loan_balance: toNumber(raw.student_loan_balance),
+    credit_card_balance: toNumber(raw.credit_card_balance, totalCreditUsed),
+    other_debt: toNumber(raw.other_debt),
+    dti_ratio: dtiRatio,
+    on_time_payments: toNumber(raw.on_time_payments),
+    late_payments_30d: toNumber(raw.late_payments_30d, toNumber(raw.num_late_payments_12m)),
+    late_payments_60d: toNumber(raw.late_payments_60d),
+    late_payments_90d: toNumber(raw.late_payments_90d),
+    collections: toNumber(raw.collections, toNumber(raw.num_collections)),
+    bankruptcies: toNumber(raw.bankruptcies, toNumber(raw.num_bankruptcies)),
+    foreclosures: toNumber(raw.foreclosures),
+    charge_offs: toNumber(raw.charge_offs, toNumber(raw.num_defaults)),
+    hard_inquiries_6m: toNumber(raw.hard_inquiries_6m, toNumber(raw.num_hard_inquiries_6m)),
+    hard_inquiries_12m: toNumber(raw.hard_inquiries_12m, toNumber(raw.num_hard_inquiries_12m)),
+    soft_inquiries_12m: toNumber(raw.soft_inquiries_12m),
+    checking_balance: toNumber(raw.checking_balance),
+    savings_balance: toNumber(raw.savings_balance),
+    investment_balance: toNumber(raw.investment_balance),
+    property_value: toNumber(raw.property_value),
+    vehicle_value: toNumber(raw.vehicle_value),
+    is_active: raw.is_active === undefined ? true : Boolean(raw.is_active),
+    created_at: String(raw.created_at || ""),
+    updated_at: String(raw.updated_at || ""),
+    notes: typeof raw.notes === "string" ? raw.notes : undefined,
+  };
+}
+
 // ─── Customer List Page ───────────────────────────────────────────────────────
 
 function CustomersPage({ onSelect }: { onSelect: (c: Customer) => void }) {
@@ -17,7 +104,7 @@ function CustomersPage({ onSelect }: { onSelect: (c: Customer) => void }) {
     const params = search ? `?search=${encodeURIComponent(search)}&search_type=fuzzy` : "?page=1&page_size=30";
     fetch(`${API}/customers${params}`)
       .then((r) => r.json())
-      .then((d) => setCustomers(d.customers || []))
+      .then((d) => setCustomers((d.customers || []).map((customer: Record<string, unknown>) => normalizeCustomer(customer))))
       .catch(() => {})
       .finally(() => setLoading(false));
   }, [search]);

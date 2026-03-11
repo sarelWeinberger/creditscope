@@ -39,13 +39,15 @@ function MetricRow({ label, value }: { label: string; value: string }) {
   );
 }
 
-function formatCurrency(n: number) {
+function formatCurrency(n: number | undefined) {
+  if (typeof n !== "number" || Number.isNaN(n)) return "—";
   if (n >= 1_000_000) return `$${(n / 1_000_000).toFixed(1)}M`;
   if (n >= 1_000) return `$${(n / 1_000).toFixed(0)}K`;
   return `$${n.toFixed(0)}`;
 }
 
-function formatPct(n: number) {
+function formatPct(n: number | undefined) {
+  if (typeof n !== "number" || Number.isNaN(n)) return "—";
   return `${(n * 100).toFixed(1)}%`;
 }
 
