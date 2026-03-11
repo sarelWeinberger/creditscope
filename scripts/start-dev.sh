@@ -15,8 +15,10 @@ if [ -f "$PROJECT_ROOT/.env" ]; then
 fi
 
 # Default ports
+INFERENCE_PORT=${SGLANG_PORT:-8000}
 BACKEND_PORT=${BACKEND_PORT:-8080}
 FRONTEND_PORT=${FRONTEND_PORT:-3000}
+START_INFERENCE=${START_INFERENCE:-true}
 
 # Colors
 RED='\033[0;31m'
@@ -24,22 +26,58 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m'
 
+usage() {
+    echo "Usage: $(basename "$0") [--inference | --no-inference]"
+}
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --inference)
+            START_INFERENCE=true
+            ;;
+        --no-inference)
+            START_INFERENCE=false
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        *)
+            echo -e "${RED}Unknown option: $1${NC}"
+            usage
+            exit 1
+            ;;
+    esac
+    shift
+done
+
 PIDS=()
+SHUTTING_DOWN=0
 
 cleanup() {
+    if [ "$SHUTTING_DOWN" -eq 1 ]; then
+        return 0
+    fi
+    SHUTTING_DOWN=1
+    trap - SIGINT SIGTERM EXIT
+
     echo -e "\n${YELLOW}Shutting down services...${NC}"
     for pid in "${PIDS[@]}"; do
         kill "$pid" 2>/dev/null || true
     done
     wait 2>/dev/null || true
     echo -e "${GREEN}All services stopped.${NC}"
-    exit 0
 }
 
 trap cleanup SIGINT SIGTERM EXIT
 
 # Kill anything already on our ports
-for port in "$BACKEND_PORT" "$FRONTEND_PORT"; do
+PORTS_TO_CLEAN=("$BACKEND_PORT" "$FRONTEND_PORT")
+if [ "$START_INFERENCE" = "true" ]; then
+    PORTS_TO_CLEAN+=("$INFERENCE_PORT")
+fi
+
+for port in "${PORTS_TO_CLEAN[@]}"; do
     pid=$(lsof -ti ":$port" 2>/dev/null || true)
     if [ -n "$pid" ]; then
         echo -e "${YELLOW}Killing existing process on port $port (PID $pid)${NC}"
@@ -63,6 +101,39 @@ fi
 # Ensure PYTHONPATH includes the project root so backend/inference modules resolve
 export PYTHONPATH="${PROJECT_ROOT}${PYTHONPATH:+:$PYTHONPATH}"
 
+# ── Start Inference ───────────────────────────────────────────────────────────
+if [ "$START_INFERENCE" = "true" ]; then
+    if command -v nvidia-smi >/dev/null 2>&1; then
+        echo -e "${GREEN}Starting Inference on port $INFERENCE_PORT...${NC}"
+        cd "$PROJECT_ROOT"
+        python -m inference.server &
+        INFERENCE_PID=$!
+        PIDS+=($INFERENCE_PID)
+
+        echo -n "  Waiting for inference..."
+        for i in $(seq 1 180); do
+            if curl -sf "http://localhost:$INFERENCE_PORT/health" > /dev/null 2>&1 || \
+               curl -sf "http://localhost:$INFERENCE_PORT/model_info" > /dev/null 2>&1; then
+                echo -e " ${GREEN}ready${NC}"
+                break
+            fi
+            if ! kill -0 "$INFERENCE_PID" 2>/dev/null; then
+                echo -e " ${RED}failed${NC}"
+                cleanup
+                exit 1
+            fi
+            if [ "$i" -eq 180 ]; then
+                echo -e " ${RED}timeout${NC}"
+                cleanup
+                exit 1
+            fi
+            sleep 2
+        done
+    else
+        echo -e "  ${YELLOW}Skipping inference startup because no NVIDIA GPU was detected${NC}"
+    fi
+fi
+
 # ── Start Backend ──────────────────────────────────────────────────────────────
 echo -e "${GREEN}Starting Backend on port $BACKEND_PORT...${NC}"
 cd "$PROJECT_ROOT"
@@ -71,7 +142,8 @@ uvicorn backend.main:app \
     --port "$BACKEND_PORT" \
     --reload \
     --reload-dir backend &
-PIDS+=($!)
+BACKEND_PID=$!
+PIDS+=($BACKEND_PID)
 
 # Wait for backend to be ready
 echo -n "  Waiting for backend..."
@@ -80,8 +152,15 @@ for i in $(seq 1 15); do
         echo -e " ${GREEN}ready${NC}"
         break
     fi
+    if ! kill -0 "$BACKEND_PID" 2>/dev/null; then
+        echo -e " ${RED}failed${NC}"
+        cleanup
+        exit 1
+    fi
     if [ "$i" -eq 15 ]; then
-        echo -e " ${RED}timeout (continuing anyway)${NC}"
+        echo -e " ${RED}timeout${NC}"
+        cleanup
+        exit 1
     fi
     sleep 1
 done
@@ -106,6 +185,9 @@ echo ""
 echo -e "${GREEN}Development servers started!${NC}"
 echo ""
 echo "Services:"
+if [ "$START_INFERENCE" = "true" ]; then
+    echo -e "  Inference: ${YELLOW}http://localhost:$INFERENCE_PORT${NC}"
+fi
 echo -e "  Backend:  ${YELLOW}http://localhost:$BACKEND_PORT${NC}"
 echo -e "  Frontend: ${YELLOW}http://localhost:$FRONTEND_PORT${NC}"
 echo -e "  API Docs: ${YELLOW}http://localhost:$BACKEND_PORT/docs${NC}"

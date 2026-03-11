@@ -180,6 +180,19 @@ def record_tokens(input_tokens: int, output_tokens: int, thinking_tokens: int = 
         thinking_tokens_total.inc(thinking_tokens)
 
 
+def record_request_tokens(
+    input_tokens: int,
+    output_tokens: int,
+    thinking_tokens: int = 0,
+) -> None:
+    """Backward-compatible wrapper for request token accounting."""
+    record_tokens(
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        thinking_tokens=thinking_tokens,
+    )
+
+
 def record_tool_call(tool_name: str) -> None:
     """Record a tool call."""
     tool_calls_total.labels(tool_name=tool_name).inc()

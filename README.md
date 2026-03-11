@@ -59,6 +59,12 @@ cp .env.example .env
 
 # Start development servers
 ./scripts/start-dev.sh
+
+# Start frontend + backend only
+./scripts/start-dev.sh --no-inference
+
+# Clean old processes, then start full dev stack
+./scripts/run_dev.sh
 ```
 
 ### Docker Deployment

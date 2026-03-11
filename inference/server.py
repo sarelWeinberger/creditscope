@@ -18,6 +18,7 @@ from pathlib import Path
 from inference.config import (
     MODEL_PATH, CONTEXT_LENGTH, TP_SIZE, PORT,
     MEM_FRACTION_STATIC, REASONING_PARSER, TOOL_CALL_PARSER,
+    EXTRA_ARGS,
 )
 
 logger = structlog.get_logger(__name__)
@@ -25,7 +26,7 @@ logger = structlog.get_logger(__name__)
 
 def build_launch_command() -> list[str]:
     """Build the SGLang server launch command."""
-    return [
+    command = [
         sys.executable, "-m", "sglang.launch_server",
         "--model-path", MODEL_PATH,
         "--port", str(PORT),
@@ -36,6 +37,8 @@ def build_launch_command() -> list[str]:
         "--tool-call-parser", TOOL_CALL_PARSER,
         "--enable-metrics",
     ]
+    command.extend(EXTRA_ARGS)
+    return command
 
 
 class SGLangServer:
@@ -65,17 +68,21 @@ class SGLangServer:
         """Poll until SGLang server is accepting requests."""
         import httpx
 
-        url = f"http://localhost:{PORT}/health"
+        urls = [
+            f"http://localhost:{PORT}/health",
+            f"http://localhost:{PORT}/model_info",
+        ]
         deadline = asyncio.get_event_loop().time() + timeout
 
         while asyncio.get_event_loop().time() < deadline:
-            try:
-                async with httpx.AsyncClient() as client:
-                    resp = await client.get(url, timeout=5)
-                    if resp.status_code == 200:
-                        return
-            except Exception:
-                pass
+            async with httpx.AsyncClient() as client:
+                for url in urls:
+                    try:
+                        resp = await client.get(url, timeout=5)
+                        if resp.status_code == 200:
+                            return
+                    except Exception:
+                        pass
             await asyncio.sleep(2)
 
         raise TimeoutError(f"SGLang server did not become ready within {timeout}s")

@@ -114,7 +114,7 @@ export default function ToolExecutionPanel({ steps }: ToolExecutionPanelProps) {
 
                 <div className="space-y-1">
                   <JsonCollapsible data={step.tool_input} label="Input" />
-                  {step.tool_output && (
+                  {step.tool_output !== undefined && step.tool_output !== null && (
                     <JsonCollapsible data={step.tool_output} label="Output" />
                   )}
                 </div>

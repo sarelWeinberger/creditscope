@@ -3,12 +3,14 @@ Inference server configuration for Qwen3.5-35B-A3B-FP8 on SGLang.
 """
 
 import os
+import shlex
 
 MODEL_PATH = os.getenv("MODEL_PATH", "Qwen/Qwen3.5-35B-A3B-FP8")
 CONTEXT_LENGTH = int(os.getenv("CONTEXT_LENGTH", "32768"))
 TP_SIZE = int(os.getenv("TP_SIZE", "1"))
 PORT = int(os.getenv("SGLANG_PORT", "8000"))
 MEM_FRACTION_STATIC = float(os.getenv("MEM_FRACTION_STATIC", "0.85"))
+EXTRA_ARGS = shlex.split(os.getenv("SGLANG_EXTRA_ARGS", ""))
 
 REASONING_PARSER = "qwen3"
 TOOL_CALL_PARSER = "qwen3_coder"
