@@ -15,11 +15,17 @@ from inference.observability import get_metrics
 
 router = APIRouter()
 INFERENCE_BASE_URL = os.getenv("SGLANG_URL", "http://127.0.0.1:8000")
+PROXY_INFERENCE_OBSERVABILITY = os.getenv(
+    "PROXY_INFERENCE_OBSERVABILITY", "false"
+).lower() == "true"
 
 
 async def _try_inference_json(path: str, params: dict | None = None) -> dict | list | None:
+    if not PROXY_INFERENCE_OBSERVABILITY:
+        return None
+
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        async with httpx.AsyncClient(timeout=1.0) as client:
             response = await client.get(f"{INFERENCE_BASE_URL}{path}", params=params)
             if response.status_code == 200:
                 return response.json()
@@ -29,8 +35,11 @@ async def _try_inference_json(path: str, params: dict | None = None) -> dict | l
 
 
 async def _try_inference_metrics() -> bytes | None:
+    if not PROXY_INFERENCE_OBSERVABILITY:
+        return None
+
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        async with httpx.AsyncClient(timeout=1.0) as client:
             response = await client.get(f"{INFERENCE_BASE_URL}/metrics")
             if response.status_code == 200:
                 return response.content

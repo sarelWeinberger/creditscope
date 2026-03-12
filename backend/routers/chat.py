@@ -134,54 +134,62 @@ async def chat_websocket(websocket: WebSocket):
 
                 images = [base64.b64decode(img) for img in msg["images"]]
 
+            # Real-time streaming callback that forwards tokens to the WebSocket
+            ws_disconnected = False
+
+            async def stream_to_ws(event_type: str, data):
+                nonlocal ws_disconnected
+                if ws_disconnected:
+                    return
+                try:
+                    if event_type == "thinking_start":
+                        await websocket.send_json({"type": "thinking_start", "session_id": session_id})
+                    elif event_type == "thinking_delta":
+                        await websocket.send_json({"type": "thinking_delta", "content": data})
+                    elif event_type == "thinking_end":
+                        await websocket.send_json({
+                            "type": "thinking_end",
+                            "full_thinking_content": data,
+                        })
+                    elif event_type == "response_start":
+                        await websocket.send_json({"type": "response_start"})
+                    elif event_type == "response_delta":
+                        await websocket.send_json({"type": "response_delta", "content": data})
+                    elif event_type == "tool_call":
+                        await websocket.send_json({
+                            "type": "tool_call",
+                            "tool_calls": [{
+                                "function": {
+                                    "name": data.get("name", ""),
+                                    "arguments": json.dumps(data.get("args", {})),
+                                }
+                            }],
+                        })
+                except Exception:
+                    ws_disconnected = True
+
             result = await agent.process_query(
                 query=query,
                 images=images,
                 cot_config=cot_config,
                 session_id=session_id,
+                stream_callback=stream_to_ws,
             )
 
+            if ws_disconnected:
+                continue
+
+            # Send any remaining thinking metadata
             if result.thinking and result.thinking.get("content") is not None:
-                await websocket.send_json({"type": "thinking_start", "session_id": session_id})
-                thinking_content = result.thinking.get("content") or ""
-                for i in range(0, len(thinking_content), 40):
-                    await websocket.send_json({
-                        "type": "thinking_delta",
-                        "content": thinking_content[i:i + 40],
-                    })
                 await websocket.send_json({
                     "type": "thinking_end",
                     "tokens_used": result.thinking.get("tokens_used", 0),
                     "thinking_tokens": result.thinking.get("tokens_used", 0),
                     "duration_ms": result.thinking.get("duration_ms", 0.0),
-                    "full_thinking_content": thinking_content,
+                    "full_thinking_content": result.thinking.get("content", ""),
                     "budget": result.thinking.get("budget", 0),
                     "budget_utilization_pct": result.thinking.get("budget_utilization_pct"),
                     "was_budget_enforced": result.thinking.get("was_budget_enforced", False),
-                })
-
-            for trace in result.execution_trace:
-                await websocket.send_json({
-                    "type": "tool_call",
-                    "tool_calls": [{
-                        "function": {
-                            "name": trace.get("tool_name") or trace.get("tool"),
-                            "arguments": json.dumps(trace.get("tool_input") or trace.get("input") or {}),
-                        }
-                    }],
-                    "tool_result": trace,
-                })
-                if result.moe_traces:
-                    await websocket.send_json({"type": "moe_trace", "data": result.moe_traces})
-
-            await websocket.send_json({"type": "response_start"})
-
-            answer = result.answer
-            chunk_size = 50
-            for i in range(0, len(answer), chunk_size):
-                await websocket.send_json({
-                    "type": "response_delta",
-                    "content": answer[i:i + chunk_size],
                 })
 
             await websocket.send_json({

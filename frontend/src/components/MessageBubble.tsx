@@ -75,7 +75,7 @@ function renderInline(text: string): React.ReactNode {
   });
 }
 
-export default function MessageBubble({ message, cotVisibility }: MessageBubbleProps) {
+function MessageBubbleInner({ message, cotVisibility }: MessageBubbleProps) {
   const isUser = message.role === "user";
   const [showToolDetails, setShowToolDetails] = useState(false);
 
@@ -166,3 +166,6 @@ export default function MessageBubble({ message, cotVisibility }: MessageBubbleP
     </div>
   );
 }
+
+const MessageBubble = React.memo(MessageBubbleInner);
+export default MessageBubble;

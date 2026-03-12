@@ -15,7 +15,9 @@ import json
 import os
 import time
 import uuid
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from typing import Any
 
 import httpx
 import structlog
@@ -40,6 +42,11 @@ logger = structlog.get_logger(__name__)
 MAX_STEPS = 8
 SGLANG_BASE_URL = os.getenv("SGLANG_URL", "http://127.0.0.1:8000")
 MAX_COMPLETION_TOKENS = int(os.getenv("CHAT_MAX_TOKENS", "512"))
+
+# Callback type for streaming deltas: (event_type, content) -> awaitable
+# event_type is "thinking_delta", "response_delta", "thinking_start", "thinking_end",
+# "response_start", "tool_call", "step_start"
+StreamCallback = Callable[[str, Any], Awaitable[None]]
 
 
 @dataclass
@@ -107,7 +114,7 @@ class CreditScopeAgent:
         self.adaptive_strategy = AdaptiveCoTStrategy()
         self.tool_schemas = TOOLS
         self.system_prompt = SYSTEM_PROMPT.format(tool_descriptions=json.dumps(TOOLS, indent=2))
-        self._client = httpx.AsyncClient(timeout=120.0)
+        self._client = httpx.AsyncClient(timeout=300.0)
 
     async def process_query(
         self,
@@ -115,6 +122,7 @@ class CreditScopeAgent:
         images: list[bytes] | None = None,
         cot_config: CoTConfig | None = None,
         session_id: str | None = None,
+        stream_callback: StreamCallback | None = None,
     ) -> AgentResponse:
         """Run the main ReAct loop for a banker query."""
         request_started_at = time.time()
@@ -166,7 +174,10 @@ class CreditScopeAgent:
 
         for step in range(MAX_STEPS):
             started_at = time.time()
-            response = await self._call_model(messages, request_params, request_id=request_id)
+            response = await self._call_model(
+                messages, request_params, request_id=request_id,
+                stream_callback=stream_callback,
+            )
             duration_ms = (time.time() - started_at) * 1000
 
             usage = response.get("usage", {})
@@ -242,6 +253,8 @@ class CreditScopeAgent:
                 except json.JSONDecodeError:
                     tool_args = {}
 
+                if stream_callback:
+                    await stream_callback("tool_call", {"name": tool_name, "args": tool_args})
                 tool_started_at = time.time()
                 result = await self.tool_registry.execute(tool_name, tool_args)
                 tool_duration = (time.time() - tool_started_at) * 1000
@@ -307,15 +320,22 @@ class CreditScopeAgent:
             auto_budget=auto_budget,
         )
 
-    async def _call_model(self, messages: list[dict], params: dict, request_id: str) -> dict:
-        """Call the SGLang inference server."""
+    async def _call_model(
+        self,
+        messages: list[dict],
+        params: dict,
+        request_id: str,
+        stream_callback: StreamCallback | None = None,
+    ) -> dict:
+        """Call the SGLang inference server, optionally streaming tokens."""
+        use_stream = stream_callback is not None
         payload = {
             "model": "default",
             "messages": messages,
             "tools": self.tool_schemas,
             "tool_choice": "auto",
             "max_tokens": MAX_COMPLETION_TOKENS,
-            "stream": False,
+            "stream": use_stream,
         }
         for key in ("temperature", "top_p", "top_k", "min_p"):
             if key in params:
@@ -342,17 +362,20 @@ class CreditScopeAgent:
             thinking_enabled=params.get("chat_template_kwargs", {}).get("enable_thinking", True),
         )
         try:
-            with track_inference_latency():
-                resp = await self._client.post(f"{SGLANG_BASE_URL}/v1/chat/completions", json=payload)
-            resp.raise_for_status()
-            result = resp.json()
+            if use_stream:
+                result = await self._call_model_streaming(payload, stream_callback, request_id)
+            else:
+                with track_inference_latency():
+                    resp = await self._client.post(f"{SGLANG_BASE_URL}/v1/chat/completions", json=payload)
+                resp.raise_for_status()
+                result = resp.json()
+
             usage = result.get("usage", {})
             finish_reason = result.get("choices", [{}])[0].get("finish_reason")
             logger.info(
                 "model_call_completed",
                 request_id=request_id,
                 duration_ms=round((time.time() - model_started_at) * 1000, 1),
-                status_code=resp.status_code,
                 prompt_tokens=usage.get("prompt_tokens", 0),
                 completion_tokens=usage.get("completion_tokens", 0),
                 finish_reason=finish_reason,
@@ -379,6 +402,96 @@ class CreditScopeAgent:
                 ],
                 "usage": {},
             }
+
+    async def _call_model_streaming(
+        self,
+        payload: dict,
+        callback: StreamCallback,
+        request_id: str,
+    ) -> dict:
+        """Stream tokens from SGLang and forward via callback. Returns assembled response."""
+        reasoning_content = ""
+        response_content = ""
+        tool_calls_acc: dict[int, dict] = {}  # index -> {id, function: {name, arguments}}
+        finish_reason = None
+        usage = {}
+        sent_thinking_start = False
+        sent_response_start = False
+
+        url = f"{SGLANG_BASE_URL}/v1/chat/completions"
+        async with self._client.stream("POST", url, json=payload) as resp:
+            resp.raise_for_status()
+            async for raw_line in resp.aiter_lines():
+                if not raw_line.startswith("data: "):
+                    continue
+                data_str = raw_line[6:]
+                if data_str.strip() == "[DONE]":
+                    break
+                try:
+                    chunk = json.loads(data_str)
+                except json.JSONDecodeError:
+                    continue
+
+                delta = chunk.get("choices", [{}])[0].get("delta", {})
+                chunk_finish = chunk.get("choices", [{}])[0].get("finish_reason")
+                if chunk_finish:
+                    finish_reason = chunk_finish
+                if chunk.get("usage"):
+                    usage = chunk["usage"]
+
+                # Thinking tokens
+                thinking_delta = delta.get("reasoning_content")
+                if thinking_delta:
+                    if not sent_thinking_start:
+                        await callback("thinking_start", None)
+                        sent_thinking_start = True
+                    reasoning_content += thinking_delta
+                    await callback("thinking_delta", thinking_delta)
+
+                # Response tokens
+                content_delta = delta.get("content")
+                if content_delta:
+                    if sent_thinking_start and not sent_response_start:
+                        await callback("thinking_end", reasoning_content)
+                        sent_response_start = True
+                    if not sent_response_start:
+                        await callback("response_start", None)
+                        sent_response_start = True
+                    response_content += content_delta
+                    await callback("response_delta", content_delta)
+
+                # Tool call deltas
+                for tc_delta in delta.get("tool_calls") or []:
+                    idx = tc_delta.get("index", 0)
+                    if idx not in tool_calls_acc:
+                        tool_calls_acc[idx] = {
+                            "id": tc_delta.get("id", ""),
+                            "type": "function",
+                            "function": {"name": "", "arguments": ""},
+                        }
+                    fn = tc_delta.get("function", {})
+                    if fn.get("name"):
+                        tool_calls_acc[idx]["function"]["name"] += fn["name"]
+                    if fn.get("arguments"):
+                        tool_calls_acc[idx]["function"]["arguments"] += fn["arguments"]
+
+        # End thinking if we never got content tokens
+        if sent_thinking_start and not sent_response_start:
+            await callback("thinking_end", reasoning_content)
+
+        # Build the assembled response in the same format as non-streaming
+        message: dict[str, Any] = {}
+        if response_content:
+            message["content"] = response_content
+        if reasoning_content:
+            message["reasoning_content"] = reasoning_content
+        if tool_calls_acc:
+            message["tool_calls"] = [tool_calls_acc[i] for i in sorted(tool_calls_acc)]
+
+        return {
+            "choices": [{"message": message, "finish_reason": finish_reason}],
+            "usage": usage,
+        }
 
     def _estimate_message_chars(self, messages: list[dict]) -> int:
         total = 0

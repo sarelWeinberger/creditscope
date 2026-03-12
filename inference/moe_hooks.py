@@ -129,61 +129,73 @@ class MoETraceCollector:
     def _extract_trace(
         self, layer_name: str, module: Any, input: tuple, output: Any
     ) -> MoELayerTrace | None:
-        """Extract MoE routing data from a forward pass."""
+        """Extract MoE routing data from a forward pass.
+
+        Uses non-blocking GPU operations where possible and avoids
+        transferring full router_logits to CPU.  Only the top-k indices,
+        gating weights, and a scalar entropy value are moved to host memory.
+        """
         try:
-            # Attempt to extract from different SGLang MoE output formats
-            router_logits = None
-            selected_experts = None
-            gating_weights = None
+            import torch
+
+            # ── Resolve raw tensors (stay on GPU) ─────────────────────────
+            raw_logits = None
+            raw_selected = None
+            raw_weights = None
 
             if hasattr(output, "router_logits"):
-                router_logits = output.router_logits.detach().cpu().numpy()
-                selected_experts = output.selected_experts.detach().cpu().numpy()
-                gating_weights = output.gating_weights.detach().cpu().numpy()
+                raw_logits = output.router_logits.detach()
+                raw_selected = output.selected_experts.detach()
+                raw_weights = output.gating_weights.detach()
             elif isinstance(output, tuple) and len(output) >= 2:
-                # Some MoE implementations return (hidden_states, router_logits, ...)
                 if hasattr(output[1], "detach"):
-                    router_logits = output[1].detach().cpu().numpy()
+                    raw_logits = output[1].detach()
             elif hasattr(module, "last_router_logits"):
-                router_logits = module.last_router_logits.detach().cpu().numpy()
+                raw_logits = module.last_router_logits.detach()
 
-            if router_logits is None:
+            if raw_logits is None:
                 return None
 
-            num_tokens = router_logits.shape[0]
+            num_tokens = raw_logits.shape[0]
 
-            # Compute top-k if not already provided
-            if selected_experts is None:
-                top_k_indices = np.argsort(router_logits, axis=-1)[:, -self._top_k:]
-                selected_experts = top_k_indices
+            # ── Top-k selection on GPU ────────────────────────────────────
+            if raw_selected is None:
+                raw_selected = torch.topk(raw_logits, self._top_k, dim=-1).indices
 
-            if gating_weights is None:
-                # Compute softmax gating weights for selected experts
-                exp_logits = np.exp(router_logits - router_logits.max(axis=-1, keepdims=True))
-                softmax = exp_logits / exp_logits.sum(axis=-1, keepdims=True)
-                gating_weights = np.take_along_axis(softmax, selected_experts, axis=-1)
+            if raw_weights is None:
+                max_logits = raw_logits.max(dim=-1, keepdim=True).values
+                exp_logits = torch.exp(raw_logits - max_logits)
+                softmax = exp_logits / exp_logits.sum(dim=-1, keepdim=True)
+                raw_weights = torch.gather(softmax, 1, raw_selected)
 
-            # Expert load: count tokens per expert
+            # ── Entropy on GPU (scalar) ───────────────────────────────────
+            max_logits = raw_logits.max(dim=-1, keepdim=True).values
+            probs = torch.exp(raw_logits - max_logits)
+            probs = probs / probs.sum(dim=-1, keepdim=True)
+            entropy_val = float(
+                -(probs * torch.log(probs + 1e-10)).sum(dim=-1).mean().item()
+            )
+
+            # ── Single CPU transfer (small tensors only) ─────────────────
+            selected_experts = raw_selected.cpu().numpy()
+            gating_weights = raw_weights.cpu().numpy()
+
+            # Expert load from the small selected_experts array
             expert_load = {}
             for expert_id in range(self._num_experts):
                 count = int(np.sum(selected_experts == expert_id))
                 if count > 0:
                     expert_load[expert_id] = count
 
-            # Shannon entropy of routing distribution
-            probs = np.exp(router_logits - router_logits.max(axis=-1, keepdims=True))
-            probs = probs / probs.sum(axis=-1, keepdims=True)
-            entropy = float(-np.sum(probs * np.log(probs + 1e-10), axis=-1).mean())
-
             return MoELayerTrace(
                 layer_name=layer_name,
                 timestamp=time.time(),
-                router_logits=router_logits,
+                router_logits=np.empty(0),  # not stored to save memory
                 selected_experts=selected_experts,
                 gating_weights=gating_weights,
                 expert_load=expert_load,
                 num_tokens=num_tokens,
-                entropy=entropy,
+                entropy=entropy_val,
             )
         except Exception as e:
             logger.warning("trace_extraction_failed", layer=layer_name, error=str(e))

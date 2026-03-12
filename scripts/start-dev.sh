@@ -167,12 +167,38 @@ start_background_service() {
     local service="$1"
     shift
     local log_file
+    local executable
+    local pid
 
     log_file=$(log_file_for "$service")
+
+    if [ "$#" -eq 0 ]; then
+        echo -e "${RED}No command configured for $service${NC}"
+        return 1
+    fi
+
+    executable="$1"
+    if [[ "$executable" != */* ]] && ! command -v "$executable" >/dev/null 2>&1; then
+        echo -e "${RED}Unable to start $service: command '$executable' was not found${NC}"
+        return 1
+    fi
+
     : > "$log_file"
     nohup "$@" >> "$log_file" 2>&1 < /dev/null &
-    write_pid "$service" "$!"
-    PIDS+=("$!")
+    pid="$!"
+    write_pid "$service" "$pid"
+    PIDS+=("$pid")
+
+    sleep 1
+    if ! is_pid_running "$pid"; then
+        echo -e "${RED}$service exited immediately after launch${NC}"
+        if [ -s "$log_file" ]; then
+            echo -e "${YELLOW}Recent $service log output:${NC}"
+            tail -n 20 "$log_file"
+        fi
+        remove_pid_file "$service"
+        return 1
+    fi
 }
 
 wait_for_http() {

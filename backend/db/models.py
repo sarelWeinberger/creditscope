@@ -106,6 +106,10 @@ DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./data/creditscope.db")
 
 engine = create_engine(DATABASE_URL, echo=False)
 
+from sqlalchemy.orm import sessionmaker as _sessionmaker
+
+_SessionLocal = _sessionmaker(bind=engine)
+
 
 def init_db():
     """Create all tables."""
@@ -119,6 +123,4 @@ def init_db():
 
 def get_session() -> Session:
     """Get a new database session."""
-    from sqlalchemy.orm import sessionmaker
-    SessionLocal = sessionmaker(bind=engine)
-    return SessionLocal()
+    return _SessionLocal()

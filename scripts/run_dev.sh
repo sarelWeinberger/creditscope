@@ -3,6 +3,10 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+RUN_DIR="$PROJECT_ROOT/.run"
+LOG_DIR="$RUN_DIR/logs"
+RUN_TIMESTAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+RUN_LOG="$LOG_DIR/run_dev_${RUN_TIMESTAMP}.log"
 
 BACKEND_PORT=${BACKEND_PORT:-8080}
 FRONTEND_PORT=${FRONTEND_PORT:-3000}
@@ -12,6 +16,36 @@ RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m'
+
+mkdir -p "$LOG_DIR"
+exec 3>&1 4>&2
+printf '[%s] run_dev log: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$RUN_LOG" >&3
+exec >> "$RUN_LOG" 2>&1
+
+log_line() {
+	printf '[%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"
+}
+
+console_line() {
+	printf '[%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >&3
+}
+
+finish() {
+	local exit_code=$?
+	log_line "run_dev finished with exit code $exit_code"
+	log_line "run_dev log saved to $RUN_LOG"
+	console_line "run_dev finished with exit code $exit_code"
+	console_line "run_dev log saved to $RUN_LOG"
+}
+
+trap finish EXIT
+
+log_line "run_dev started"
+log_line "project_root=$PROJECT_ROOT"
+log_line "cwd=$(pwd)"
+log_line "args=${*:-<none>}"
+log_line "log_file=$RUN_LOG"
+console_line "run_dev started"
 
 kill_pid() {
 	local pid="$1"
@@ -183,4 +217,10 @@ mkdir -p "$PROMETHEUS_MULTIPROC_DIR"
 rm -f "$PROMETHEUS_MULTIPROC_DIR"/*.db "$PROMETHEUS_MULTIPROC_DIR"/*.tmp 2>/dev/null || true
 
 echo -e "${GREEN}Starting backend and frontend...${NC}"
-exec "$SCRIPT_DIR/start-dev.sh" "${START_DEV_ARGS[@]}"
+log_line "delegating to start-dev.sh with args: ${START_DEV_ARGS[*]:-<none>}"
+set +e
+"$SCRIPT_DIR/start-dev.sh" "${START_DEV_ARGS[@]}"
+start_dev_exit_code=$?
+set -e
+log_line "start-dev.sh exited with code $start_dev_exit_code"
+exit "$start_dev_exit_code"

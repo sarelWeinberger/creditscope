@@ -99,12 +99,12 @@ export function useObservability(): ObservabilityState {
     // Initial fetch
     refresh();
 
-    // Heatmap: every 2s
-    heatmapTimer.current = window.setInterval(fetchHeatmap, 2000);
-    // Entropy: every 1s
-    entropyTimer.current = window.setInterval(fetchEntropy, 1000);
-    // Layers: every 2s
-    layerTimer.current = window.setInterval(fetchLayers, 2000);
+    // Heatmap: every 15s
+    heatmapTimer.current = window.setInterval(fetchHeatmap, 15000);
+    // Entropy: every 10s
+    entropyTimer.current = window.setInterval(fetchEntropy, 10000);
+    // Layers: every 15s
+    layerTimer.current = window.setInterval(fetchLayers, 15000);
 
     return () => {
       if (heatmapTimer.current !== null) clearInterval(heatmapTimer.current);

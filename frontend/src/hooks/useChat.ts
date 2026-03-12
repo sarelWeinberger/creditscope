@@ -363,7 +363,7 @@ export function useChat(initialSessionId?: string): UseChatReturn {
               visibility: cotConfig.visibility,
               enable_thinking: cotConfig.enable_thinking,
             }
-          : { mode: "on", budget: "unlimited", visibility: "collapsed", enable_thinking: true },
+          : { mode: "on", budget: "standard", visibility: "collapsed", enable_thinking: true },
       };
 
       wsRef.current.send(JSON.stringify(payload));

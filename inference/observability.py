@@ -5,6 +5,7 @@ Prometheus metrics and expert trace collector for MoE observability.
 import time
 from contextlib import contextmanager
 
+import numpy as np
 from prometheus_client import (
     Counter,
     Gauge,
@@ -129,8 +130,7 @@ def record_moe_trace(trace) -> None:
         moe_router_entropy.labels(layer=layer).set(layer_trace.entropy)
 
         # Mean gating weights
-        if layer_trace.gating_weights is not None:
-            import numpy as np
+        if layer_trace.gating_weights is not None and layer_trace.gating_weights.size > 0:
             for i, expert_id in enumerate(
                 range(layer_trace.selected_experts.shape[1])
             ):

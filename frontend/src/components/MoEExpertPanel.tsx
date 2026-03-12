@@ -1,10 +1,12 @@
 import React, { useState } from "react";
 import { ExpertHeatmap, HeatmapCell, MoERequestTrace } from "../types";
-import { useObservability } from "../hooks/useObservability";
 
 interface MoEExpertPanelProps {
   requestTrace?: MoERequestTrace | null;
   fullView?: boolean;
+  heatmapData?: ExpertHeatmap | null;
+  autoRefresh?: boolean;
+  onToggleAutoRefresh?: () => void;
 }
 
 function heatColor(freq: number): string {
@@ -103,8 +105,7 @@ function HeatmapGrid({ heatmap }: { heatmap: ExpertHeatmap }) {
   );
 }
 
-export default function MoEExpertPanel({ requestTrace, fullView = false }: MoEExpertPanelProps) {
-  const { heatmapData, autoRefresh, setAutoRefresh } = useObservability();
+export default function MoEExpertPanel({ requestTrace, fullView = false, heatmapData = null, autoRefresh = false, onToggleAutoRefresh }: MoEExpertPanelProps) {
   const [view, setView] = useState<"request" | "session">("session");
 
   return (
@@ -124,12 +125,14 @@ export default function MoEExpertPanel({ requestTrace, fullView = false }: MoEEx
           >
             This Request
           </button>
-          <button
-            onClick={() => setAutoRefresh(!autoRefresh)}
-            className={`text-xs px-2 py-0.5 rounded border ${autoRefresh ? "border-green-600 text-green-400" : "border-gray-700 text-gray-500"}`}
-          >
-            {autoRefresh ? "● Live" : "Paused"}
-          </button>
+          {onToggleAutoRefresh && (
+            <button
+              onClick={onToggleAutoRefresh}
+              className={`text-xs px-2 py-0.5 rounded border ${autoRefresh ? "border-green-600 text-green-400" : "border-gray-700 text-gray-500"}`}
+            >
+              {autoRefresh ? "● Live" : "Paused"}
+            </button>
+          )}
         </div>
       </div>
 

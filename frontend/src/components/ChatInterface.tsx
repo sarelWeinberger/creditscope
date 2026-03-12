@@ -14,7 +14,7 @@ interface ChatInterfaceProps {
 
 const DEFAULT_COT: CoTConfig = {
   mode: ThinkingMode.On,
-  budget: "unlimited",
+  budget: "standard",
   visibility: ThinkingVisibility.Collapsed,
   enable_thinking: true,
 };
@@ -32,9 +32,17 @@ export default function ChatInterface({ selectedCustomer }: ChatInterfaceProps) 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
-  // Auto-scroll to bottom
+  // Auto-scroll to bottom (use "auto" to avoid expensive smooth-scroll
+  // animations that fire on every streaming delta)
+  const scrollTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    if (scrollTimeoutRef.current) clearTimeout(scrollTimeoutRef.current);
+    scrollTimeoutRef.current = setTimeout(() => {
+      messagesEndRef.current?.scrollIntoView({ behavior: "auto" });
+    }, 80);
+    return () => {
+      if (scrollTimeoutRef.current) clearTimeout(scrollTimeoutRef.current);
+    };
   }, [messages]);
 
   const handleSend = useCallback(() => {

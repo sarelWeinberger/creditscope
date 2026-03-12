@@ -185,7 +185,11 @@ export default function ObservabilityDash() {
         <h3 className="text-sm font-semibold text-gray-300 mb-3">
           Expert Activation Heatmap
         </h3>
-        <MoEExpertPanel />
+        <MoEExpertPanel
+          heatmapData={heatmapData}
+          autoRefresh={autoRefresh}
+          onToggleAutoRefresh={() => setAutoRefresh(!autoRefresh)}
+        />
       </div>
 
       {/* Entropy chart */}

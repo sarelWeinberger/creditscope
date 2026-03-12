@@ -99,17 +99,24 @@ function normalizeCustomer(raw: Record<string, unknown>): Customer {
 function CustomersPage({ onSelect }: { onSelect: (c: Customer) => void }) {
   const [customers, setCustomers] = React.useState<Customer[]>([]);
   const [search, setSearch] = React.useState("");
+  const [debouncedSearch, setDebouncedSearch] = React.useState("");
   const [loading, setLoading] = React.useState(false);
+
+  // Debounce search input by 300ms
+  React.useEffect(() => {
+    const timer = setTimeout(() => setDebouncedSearch(search), 300);
+    return () => clearTimeout(timer);
+  }, [search]);
 
   React.useEffect(() => {
     setLoading(true);
-    const params = search ? `?search=${encodeURIComponent(search)}&search_type=fuzzy` : "?page=1&page_size=30";
+    const params = debouncedSearch ? `?search=${encodeURIComponent(debouncedSearch)}&search_type=fuzzy` : "?page=1&page_size=30";
     fetch(`${API_BASE}/customers${params}`, { credentials: "include" })
       .then((r) => r.json())
       .then((d) => setCustomers((d.customers || []).map((customer: Record<string, unknown>) => normalizeCustomer(customer))))
       .catch(() => {})
       .finally(() => setLoading(false));
-  }, [search]);
+  }, [debouncedSearch]);
 
   return (
     <div className="p-6">
