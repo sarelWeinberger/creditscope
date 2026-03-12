@@ -143,16 +143,16 @@ echo -e "${GREEN}Cleaning existing CreditScope dev processes...${NC}"
 
 while [ "$#" -gt 0 ]; do
 	case "$1" in
-		--inference|--no-inference)
+		--inference|--no-inference|--detach|--foreground)
 			START_DEV_ARGS+=("$1")
 			;;
 		-h|--help)
-			echo "Usage: $(basename "$0") [--inference | --no-inference]"
+			echo "Usage: $(basename "$0") [--inference | --no-inference] [--detach | --foreground]"
 			exit 0
 			;;
 		*)
 			echo -e "${RED}Unknown option: $1${NC}"
-			echo "Usage: $(basename "$0") [--inference | --no-inference]"
+			echo "Usage: $(basename "$0") [--inference | --no-inference] [--detach | --foreground]"
 			exit 1
 			;;
 	esac

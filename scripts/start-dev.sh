@@ -6,6 +6,9 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+RUN_DIR="$PROJECT_ROOT/.run"
+PID_DIR="$RUN_DIR/pids"
+LOG_DIR="$RUN_DIR/logs"
 
 # Load environment
 if [ -f "$PROJECT_ROOT/.env" ]; then
@@ -19,6 +22,9 @@ INFERENCE_PORT=${SGLANG_PORT:-8000}
 BACKEND_PORT=${BACKEND_PORT:-8080}
 FRONTEND_PORT=${FRONTEND_PORT:-3000}
 START_INFERENCE=${START_INFERENCE:-true}
+DETACH_MODE=true
+STATUS_ONLY=false
+STOP_ONLY=false
 
 # Colors
 RED='\033[0;31m'
@@ -26,8 +32,173 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m'
 
+PIDS=()
+SHUTTING_DOWN=0
+
 usage() {
-    echo "Usage: $(basename "$0") [--inference | --no-inference]"
+    echo "Usage: $(basename "$0") [--inference | --no-inference] [--detach | --foreground] [--status] [--stop]"
+}
+
+mkdir -p "$PID_DIR" "$LOG_DIR"
+
+pid_file_for() {
+    local service="$1"
+    echo "$PID_DIR/$service.pid"
+}
+
+log_file_for() {
+    local service="$1"
+    echo "$LOG_DIR/$service.log"
+}
+
+is_pid_running() {
+    local pid="$1"
+    [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null
+}
+
+read_pid() {
+    local service="$1"
+    local pid_file
+
+    pid_file=$(pid_file_for "$service")
+    if [ -f "$pid_file" ]; then
+        tr -d '[:space:]' < "$pid_file"
+    fi
+}
+
+write_pid() {
+    local service="$1"
+    local pid="$2"
+
+    echo "$pid" > "$(pid_file_for "$service")"
+}
+
+remove_pid_file() {
+    local service="$1"
+    rm -f "$(pid_file_for "$service")"
+}
+
+cleanup_stale_pid_files() {
+    local service
+    local pid
+
+    for service in inference backend frontend; do
+        pid=$(read_pid "$service")
+        if [ -n "$pid" ] && ! is_pid_running "$pid"; then
+            remove_pid_file "$service"
+        fi
+    done
+}
+
+kill_pid() {
+    local pid="$1"
+
+    if ! is_pid_running "$pid"; then
+        return 0
+    fi
+
+    kill "$pid" 2>/dev/null || true
+    for _ in $(seq 1 10); do
+        if ! is_pid_running "$pid"; then
+            return 0
+        fi
+        sleep 1
+    done
+
+    kill -9 "$pid" 2>/dev/null || true
+}
+
+stop_service() {
+    local service="$1"
+    local pid
+
+    pid=$(read_pid "$service")
+    if [ -z "$pid" ]; then
+        remove_pid_file "$service"
+        return 0
+    fi
+
+    if is_pid_running "$pid"; then
+        echo -e "  ${YELLOW}Stopping $service (PID $pid)${NC}"
+        kill_pid "$pid"
+    fi
+
+    remove_pid_file "$service"
+}
+
+print_status() {
+    local service
+    local pid
+    local any_running=0
+
+    cleanup_stale_pid_files
+
+    for service in inference backend frontend; do
+        pid=$(read_pid "$service")
+        if [ -n "$pid" ] && is_pid_running "$pid"; then
+            any_running=1
+            echo -e "${GREEN}$service${NC}: running (PID $pid)"
+            echo "  log: $(log_file_for "$service")"
+        else
+            echo -e "${YELLOW}$service${NC}: stopped"
+        fi
+    done
+
+    if [ "$any_running" -eq 0 ]; then
+        echo -e "${YELLOW}No detached CreditScope services are running.${NC}"
+    fi
+}
+
+stop_detached_services() {
+    local services=(frontend backend inference)
+    local service
+
+    cleanup_stale_pid_files
+    echo -e "${GREEN}Stopping detached CreditScope services...${NC}"
+    for service in "${services[@]}"; do
+        stop_service "$service"
+    done
+    echo -e "${GREEN}Detached services stopped.${NC}"
+}
+
+start_background_service() {
+    local service="$1"
+    shift
+    local log_file
+
+    log_file=$(log_file_for "$service")
+    : > "$log_file"
+    nohup "$@" >> "$log_file" 2>&1 < /dev/null &
+    write_pid "$service" "$!"
+    PIDS+=("$!")
+}
+
+wait_for_http() {
+    local service="$1"
+    local pid="$2"
+    local attempts="$3"
+    shift 3
+    local endpoint
+    local attempt
+
+    echo -n "  Waiting for $service..."
+    for attempt in $(seq 1 "$attempts"); do
+        for endpoint in "$@"; do
+            if curl -sf "$endpoint" > /dev/null 2>&1; then
+                echo -e " ${GREEN}ready${NC}"
+                return 0
+            fi
+        done
+        if ! is_pid_running "$pid"; then
+            echo -e " ${RED}failed${NC}"
+            return 1
+        fi
+        if [ "$attempt" -eq "$attempts" ]; then
+            echo -e " ${RED}timeout${NC}"
+            return 1
+        fi
+        sleep 1
+    done
 }
 
 while [ "$#" -gt 0 ]; do
@@ -37,6 +208,18 @@ while [ "$#" -gt 0 ]; do
             ;;
         --no-inference)
             START_INFERENCE=false
+            ;;
+        --detach)
+            DETACH_MODE=true
+            ;;
+        --foreground)
+            DETACH_MODE=false
+            ;;
+        --status)
+            STATUS_ONLY=true
+            ;;
+        --stop)
+            STOP_ONLY=true
             ;;
         -h|--help)
             usage
@@ -51,8 +234,25 @@ while [ "$#" -gt 0 ]; do
     shift
 done
 
-PIDS=()
-SHUTTING_DOWN=0
+if [ "$STATUS_ONLY" = "true" ] && [ "$STOP_ONLY" = "true" ]; then
+    echo -e "${RED}--status cannot be combined with --stop${NC}"
+    exit 1
+fi
+
+if [ "$STOP_ONLY" = "true" ] && [ "$DETACH_MODE" = "false" ]; then
+    echo -e "${RED}--stop cannot be combined with --foreground${NC}"
+    exit 1
+fi
+
+if [ "$STATUS_ONLY" = "true" ]; then
+    print_status
+    exit 0
+fi
+
+if [ "$STOP_ONLY" = "true" ]; then
+    stop_detached_services
+    exit 0
+fi
 
 cleanup() {
     if [ "$SHUTTING_DOWN" -eq 1 ]; then
@@ -70,6 +270,8 @@ cleanup() {
 }
 
 trap cleanup SIGINT SIGTERM EXIT
+
+cleanup_stale_pid_files
 
 # Kill anything already on our ports
 PORTS_TO_CLEAN=("$BACKEND_PORT" "$FRONTEND_PORT")
@@ -101,70 +303,68 @@ fi
 # Ensure PYTHONPATH includes the project root so backend/inference modules resolve
 export PYTHONPATH="${PROJECT_ROOT}${PYTHONPATH:+:$PYTHONPATH}"
 export SGLANG_URL="${SGLANG_URL:-http://127.0.0.1:$INFERENCE_PORT}"
+export PROMETHEUS_MULTIPROC_DIR="${PROMETHEUS_MULTIPROC_DIR:-/tmp/prometheus}"
+mkdir -p "$PROMETHEUS_MULTIPROC_DIR"
 
 # ── Start Inference ───────────────────────────────────────────────────────────
 if [ "$START_INFERENCE" = "true" ]; then
     if command -v nvidia-smi >/dev/null 2>&1; then
         echo -e "${GREEN}Starting Inference on port $INFERENCE_PORT...${NC}"
         cd "$PROJECT_ROOT"
-        python -m inference.server &
-        INFERENCE_PID=$!
-        PIDS+=($INFERENCE_PID)
+        if [ "$DETACH_MODE" = "true" ]; then
+            start_background_service inference python -m inference.server
+            INFERENCE_PID=$(read_pid inference)
+        else
+            python -m inference.server &
+            INFERENCE_PID=$!
+            PIDS+=("$INFERENCE_PID")
+        fi
 
-        echo -n "  Waiting for inference..."
-        for i in $(seq 1 180); do
-            if curl -sf "http://localhost:$INFERENCE_PORT/health" > /dev/null 2>&1 || \
-               curl -sf "http://localhost:$INFERENCE_PORT/model_info" > /dev/null 2>&1; then
-                echo -e " ${GREEN}ready${NC}"
-                break
-            fi
-            if ! kill -0 "$INFERENCE_PID" 2>/dev/null; then
-                echo -e " ${RED}failed${NC}"
-                cleanup
-                exit 1
-            fi
-            if [ "$i" -eq 180 ]; then
-                echo -e " ${RED}timeout${NC}"
-                cleanup
-                exit 1
-            fi
-            sleep 2
-        done
+        if ! wait_for_http \
+            inference \
+            "$INFERENCE_PID" \
+            180 \
+            "http://localhost:$INFERENCE_PORT/health" \
+            "http://localhost:$INFERENCE_PORT/model_info"; then
+            cleanup
+            exit 1
+        fi
     else
         echo -e "  ${YELLOW}Skipping inference startup because no NVIDIA GPU was detected${NC}"
+        remove_pid_file inference
     fi
+else
+    remove_pid_file inference
 fi
 
 # ── Start Backend ──────────────────────────────────────────────────────────────
 echo -e "${GREEN}Starting Backend on port $BACKEND_PORT...${NC}"
 cd "$PROJECT_ROOT"
-uvicorn backend.main:app \
-    --host 0.0.0.0 \
-    --port "$BACKEND_PORT" \
-    --reload \
-    --reload-dir backend &
-BACKEND_PID=$!
-PIDS+=($BACKEND_PID)
+if [ "$DETACH_MODE" = "true" ]; then
+    start_background_service \
+        backend \
+        uvicorn \
+        backend.main:app \
+        --host 0.0.0.0 \
+        --port "$BACKEND_PORT" \
+        --reload \
+        --reload-dir backend
+    BACKEND_PID=$(read_pid backend)
+else
+    uvicorn backend.main:app \
+        --host 0.0.0.0 \
+        --port "$BACKEND_PORT" \
+        --reload \
+        --reload-dir backend &
+    BACKEND_PID=$!
+    PIDS+=("$BACKEND_PID")
+fi
 
 # Wait for backend to be ready
-echo -n "  Waiting for backend..."
-for i in $(seq 1 15); do
-    if curl -sf "http://localhost:$BACKEND_PORT/health" > /dev/null 2>&1; then
-        echo -e " ${GREEN}ready${NC}"
-        break
-    fi
-    if ! kill -0 "$BACKEND_PID" 2>/dev/null; then
-        echo -e " ${RED}failed${NC}"
-        cleanup
-        exit 1
-    fi
-    if [ "$i" -eq 15 ]; then
-        echo -e " ${RED}timeout${NC}"
-        cleanup
-        exit 1
-    fi
-    sleep 1
-done
+if ! wait_for_http backend "$BACKEND_PID" 15 "http://localhost:$BACKEND_PORT/health"; then
+    cleanup
+    exit 1
+fi
 
 # ── Start Frontend ─────────────────────────────────────────────────────────────
 echo -e "${GREEN}Starting Frontend on port $FRONTEND_PORT...${NC}"
@@ -176,14 +376,31 @@ if [ ! -d "node_modules" ]; then
     npm install
 fi
 
-npx vite --host 0.0.0.0 --port "$FRONTEND_PORT" &
-PIDS+=($!)
+if [ "$DETACH_MODE" = "true" ]; then
+    start_background_service frontend npx vite --host 0.0.0.0 --port "$FRONTEND_PORT"
+    FRONTEND_PID=$(read_pid frontend)
+else
+    npx vite --host 0.0.0.0 --port "$FRONTEND_PORT" &
+    FRONTEND_PID=$!
+    PIDS+=("$FRONTEND_PID")
+fi
+
+if ! wait_for_http frontend "$FRONTEND_PID" 30 "http://localhost:$FRONTEND_PORT"; then
+    cleanup
+    exit 1
+fi
 
 # Return to project root
 cd "$PROJECT_ROOT"
 
 echo ""
-echo -e "${GREEN}Development servers started!${NC}"
+if [ "$DETACH_MODE" = "true" ]; then
+    trap - SIGINT SIGTERM EXIT
+    SHUTTING_DOWN=1
+    echo -e "${GREEN}Detached development services started.${NC}"
+else
+    echo -e "${GREEN}Development servers started!${NC}"
+fi
 echo ""
 echo "Services:"
 if [ "$START_INFERENCE" = "true" ]; then
@@ -193,6 +410,20 @@ echo -e "  Backend:  ${YELLOW}http://localhost:$BACKEND_PORT${NC}"
 echo -e "  Frontend: ${YELLOW}http://localhost:$FRONTEND_PORT${NC}"
 echo -e "  API Docs: ${YELLOW}http://localhost:$BACKEND_PORT/docs${NC}"
 echo ""
+if [ "$DETACH_MODE" = "true" ]; then
+    echo "Logs:"
+    if [ "$START_INFERENCE" = "true" ] && [ -f "$(log_file_for inference)" ]; then
+        echo "  Inference: $(log_file_for inference)"
+    fi
+    echo "  Backend:  $(log_file_for backend)"
+    echo "  Frontend: $(log_file_for frontend)"
+    echo ""
+    echo "Manage detached services with:"
+    echo "  ./scripts/start-dev.sh --status"
+    echo "  ./scripts/start-dev.sh --stop"
+    exit 0
+fi
+
 echo -e "Press ${RED}Ctrl+C${NC} to stop all services"
 echo ""
 

@@ -60,11 +60,21 @@ cp .env.example .env
 # Start development servers
 ./scripts/start-dev.sh
 
+# Start development servers in the foreground
+./scripts/start-dev.sh --foreground
+
 # Start frontend + backend only
 ./scripts/start-dev.sh --no-inference
 
 # Clean old processes, then start full dev stack
 ./scripts/run_dev.sh
+
+# Clean old processes, then start the stack in the foreground
+./scripts/run_dev.sh --foreground
+
+# Check or stop detached dev services
+./scripts/start-dev.sh --status
+./scripts/start-dev.sh --stop
 
 # Put the app on public port 80 using nginx
 ./scripts/setup_nginx_http.sh
