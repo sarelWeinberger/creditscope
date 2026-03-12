@@ -73,6 +73,21 @@ export function useChat(initialSessionId?: string): UseChatReturn {
     });
   }, []);
 
+  const resetStreamingState = useCallback((error?: string) => {
+    setIsStreaming(false);
+    setActiveToolCalls([]);
+    toolCallsBuffer.current = [];
+    responseBuffer.current = "";
+    thinkingBuffer.current = "";
+    thinkingStartTime.current = null;
+
+    if (error) {
+      appendErrorMessage(error);
+    } else {
+      streamingMessageId.current = null;
+    }
+  }, [appendErrorMessage]);
+
   const sendViaRest = useCallback(
     async (text: string, cotConfig?: CoTConfig) => {
       setIsStreaming(true);
@@ -167,6 +182,9 @@ export function useChat(initialSessionId?: string): UseChatReturn {
 
     ws.onclose = () => {
       setIsConnected(false);
+      if (streamingMessageId.current) {
+        resetStreamingState("Connection lost while generating a response. Please try again.");
+      }
       if (reconnectAttempts.current < MAX_RECONNECT_ATTEMPTS) {
         reconnectAttempts.current += 1;
         reconnectTimer.current = window.setTimeout(connect, RECONNECT_DELAY_MS);
@@ -175,6 +193,9 @@ export function useChat(initialSessionId?: string): UseChatReturn {
 
     ws.onerror = () => {
       setIsConnected(false);
+      if (streamingMessageId.current) {
+        resetStreamingState("The chat connection encountered an error. Please try again.");
+      }
     };
 
     ws.onmessage = (event: MessageEvent) => {
@@ -185,7 +206,7 @@ export function useChat(initialSessionId?: string): UseChatReturn {
         // ignore parse errors
       }
     };
-  }, []);
+  }, [resetStreamingState]);
 
   const handleWsEvent = useCallback((event: WebSocketEvent) => {
     switch (event.type) {
