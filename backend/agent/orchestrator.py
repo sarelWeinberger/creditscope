@@ -480,9 +480,12 @@ class CreditScopeAgent:
             await callback("thinking_end", reasoning_content)
 
         # Build the assembled response in the same format as non-streaming
-        message: dict[str, Any] = {}
+        message: dict[str, Any] = {"role": "assistant"}
         if response_content:
             message["content"] = response_content
+        elif tool_calls_acc:
+            # Preserve the OpenAI-compatible assistant tool call shape for the next turn.
+            message["content"] = None
         if reasoning_content:
             message["reasoning_content"] = reasoning_content
         if tool_calls_acc:
