@@ -4,11 +4,13 @@ import {
   ChatMessage,
   CoTConfig,
   ExecutionStep,
+  MoERequestTrace,
   ThinkingMode,
   ThinkingVisibility,
   WebSocketEvent,
 } from "../types";
 
+const API_BASE = import.meta.env.VITE_API_URL || "/api";
 const WS_URL =
   import.meta.env.VITE_WS_URL ||
   `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.host}/api/chat/ws`;
@@ -43,6 +45,110 @@ export function useChat(initialSessionId?: string): UseChatReturn {
   const responseBuffer = useRef<string>("");
   const thinkingStartTime = useRef<number | null>(null);
   const toolCallsBuffer = useRef<ExecutionStep[]>([]);
+
+  const appendErrorMessage = useCallback((error: string) => {
+    const errorId = streamingMessageId.current || uuidv4();
+    streamingMessageId.current = null;
+    setMessages((prev) => {
+      const exists = prev.some((message) => message.id === errorId);
+      if (exists) {
+        return prev.map((message) =>
+          message.id === errorId
+            ? { ...message, isStreaming: false, error }
+            : message
+        );
+      }
+
+      return [
+        ...prev,
+        {
+          id: errorId,
+          role: "assistant",
+          content: "",
+          error,
+          isStreaming: false,
+          timestamp: new Date(),
+        },
+      ];
+    });
+  }, []);
+
+  const sendViaRest = useCallback(
+    async (text: string, cotConfig?: CoTConfig) => {
+      setIsStreaming(true);
+
+      const responseId = uuidv4();
+      streamingMessageId.current = responseId;
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: responseId,
+          role: "assistant",
+          content: "",
+          isStreaming: true,
+          timestamp: new Date(),
+        },
+      ]);
+
+      try {
+        const response = await fetch(`${API_BASE}/chat`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          credentials: "include",
+          body: JSON.stringify({
+            message: text,
+            session_id: sessionId,
+            cot_config: cotConfig,
+          }),
+        });
+
+        if (!response.ok) {
+          const payload = (await response.json().catch(() => null)) as { detail?: string } | null;
+          throw new Error(payload?.detail || `HTTP ${response.status}`);
+        }
+
+        const payload = (await response.json()) as {
+          answer: string;
+          thinking?: {
+            content?: string;
+            tokens_used?: number;
+            duration_ms?: number;
+            was_budget_enforced?: boolean;
+          };
+          execution_trace?: ExecutionStep[];
+          moe_trace?: MoERequestTrace;
+        };
+
+        setMessages((prev) =>
+          prev.map((message) =>
+            message.id === responseId
+              ? {
+                  ...message,
+                  content: payload.answer || "",
+                  thinking: payload.thinking?.content,
+                  thinkingTokens: payload.thinking?.tokens_used,
+                  thinkingDurationMs: payload.thinking?.duration_ms,
+                  wasThinkingEnforced: payload.thinking?.was_budget_enforced,
+                  toolCalls: payload.execution_trace || [],
+                  moeTrace: payload.moe_trace,
+                  isStreaming: false,
+                }
+              : message
+          )
+        );
+      } catch (error) {
+        appendErrorMessage(error instanceof Error ? error.message : "Request failed");
+      } finally {
+        setIsStreaming(false);
+        setActiveToolCalls([]);
+        toolCallsBuffer.current = [];
+        streamingMessageId.current = null;
+      }
+    },
+    [appendErrorMessage, sessionId]
+  );
 
   const connect = useCallback(() => {
     if (wsRef.current?.readyState === WebSocket.OPEN) return;
@@ -220,29 +326,7 @@ export function useChat(initialSessionId?: string): UseChatReturn {
 
       case "error":
         setIsStreaming(false);
-        const errorId = streamingMessageId.current || uuidv4();
-        streamingMessageId.current = null;
-        setMessages((prev) => {
-          const exists = prev.some((m) => m.id === errorId);
-          if (exists) {
-            return prev.map((m) =>
-              m.id === errorId
-                ? { ...m, isStreaming: false, error: event.error }
-                : m
-            );
-          }
-          return [
-            ...prev,
-            {
-              id: errorId,
-              role: "assistant",
-              content: "",
-              error: event.error,
-              isStreaming: false,
-              timestamp: new Date(),
-            },
-          ];
-        });
+        appendErrorMessage(event.error || "Request failed");
         break;
 
       case "pong":
@@ -252,7 +336,7 @@ export function useChat(initialSessionId?: string): UseChatReturn {
 
   const sendMessage = useCallback(
     (text: string, images?: File[], cotConfig?: CoTConfig) => {
-      if (!isConnected || !wsRef.current) return;
+      if (isStreaming) return;
 
       // Add user message to history
       const userMsg: ChatMessage = {
@@ -262,6 +346,11 @@ export function useChat(initialSessionId?: string): UseChatReturn {
         timestamp: new Date(),
       };
       setMessages((prev) => [...prev, userMsg]);
+
+      if (!isConnected || !wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
+        void sendViaRest(text, cotConfig);
+        return;
+      }
 
       const payload = {
         type: "message",
@@ -274,12 +363,12 @@ export function useChat(initialSessionId?: string): UseChatReturn {
               visibility: cotConfig.visibility,
               enable_thinking: cotConfig.enable_thinking,
             }
-          : { mode: "auto", budget: "standard", visibility: "collapsed", enable_thinking: true },
+          : { mode: "on", budget: "unlimited", visibility: "collapsed", enable_thinking: true },
       };
 
       wsRef.current.send(JSON.stringify(payload));
     },
-    [isConnected, sessionId]
+    [isConnected, isStreaming, sendViaRest, sessionId]
   );
 
   const clearMessages = useCallback(() => {

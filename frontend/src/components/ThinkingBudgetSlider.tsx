@@ -66,7 +66,7 @@ export default function ThinkingBudgetSlider({ config, onChange }: ThinkingBudge
               onChange({
                 ...config,
                 mode: thinkingOn ? ThinkingMode.Off : ThinkingMode.On,
-                budget: thinkingOn ? "none" : "standard",
+                budget: thinkingOn ? "none" : "unlimited",
                 enable_thinking: !thinkingOn,
               })
             }

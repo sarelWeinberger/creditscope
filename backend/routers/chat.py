@@ -38,7 +38,7 @@ class ThinkingResponse(BaseModel):
     content: str | None = None
     tokens_used: int = 0
     budget: int = 2048
-    budget_utilization_pct: float = 0.0
+    budget_utilization_pct: float | None = 0.0
     was_budget_enforced: bool = False
     duration_ms: float = 0.0
 

@@ -13,8 +13,8 @@ interface ChatInterfaceProps {
 }
 
 const DEFAULT_COT: CoTConfig = {
-  mode: ThinkingMode.Auto,
-  budget: "standard",
+  mode: ThinkingMode.On,
+  budget: "unlimited",
   visibility: ThinkingVisibility.Collapsed,
   enable_thinking: true,
 };
@@ -203,7 +203,7 @@ export default function ChatInterface({ selectedCustomer }: ChatInterfaceProps) 
               />
               <button
                 onClick={handleSend}
-                disabled={!input.trim() || isStreaming || !isConnected}
+                disabled={!input.trim() || isStreaming}
                 className="px-4 py-3 bg-blue-600 hover:bg-blue-500 disabled:opacity-40 disabled:cursor-not-allowed rounded-xl text-white font-medium text-sm transition-colors"
               >
                 {isStreaming ? (

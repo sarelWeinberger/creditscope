@@ -117,6 +117,7 @@ class CreditScopeAgent:
         session_id: str | None = None,
     ) -> AgentResponse:
         """Run the main ReAct loop for a banker query."""
+        request_started_at = time.time()
         request_id = str(uuid.uuid4())
         sid = session_id or str(uuid.uuid4())
 
@@ -125,6 +126,17 @@ class CreditScopeAgent:
         if cot.auto or cot.budget == "auto":
             auto_budget = self.adaptive_strategy.classify_complexity(query, has_images=bool(images))
             cot = CoTConfig(mode=cot.mode, budget=auto_budget, visibility=cot.visibility, auto=True)
+
+        logger.info(
+            "chat_request_started",
+            request_id=request_id,
+            session_id=sid,
+            query_chars=len(query),
+            has_images=bool(images),
+            thinking_mode=cot.mode,
+            thinking_budget=str(cot.budget),
+            max_completion_tokens=MAX_COMPLETION_TOKENS,
+        )
 
         request_params = self.cot_controller.build_request_params(cot.model_dump())
         record_thinking_mode(cot.mode, str(cot.budget))
@@ -176,7 +188,17 @@ class CreditScopeAgent:
                 thinking_data = current_thinking
                 total_tokens["thinking"] = current_thinking.get("tokens_used", 0)
 
-            tool_calls = message.get("tool_calls", [])
+            tool_calls = message.get("tool_calls") or []
+            logger.info(
+                "chat_step_completed",
+                request_id=request_id,
+                step=step,
+                duration_ms=round(duration_ms, 1),
+                tool_calls=len(tool_calls),
+                prompt_tokens=usage.get("prompt_tokens", 0),
+                completion_tokens=usage.get("completion_tokens", 0),
+                thinking_tokens=total_tokens["thinking"],
+            )
             if not tool_calls:
                 if thinking_data:
                     self._record_thinking(request_id, thinking_data)
@@ -185,8 +207,23 @@ class CreditScopeAgent:
                     output_tokens=total_tokens["output"],
                     thinking_tokens=total_tokens["thinking"],
                 )
+                answer_content = message.get("content")
+                if answer_content is None:
+                    answer_content = ""
+                total_duration_ms = (time.time() - request_started_at) * 1000
+                logger.info(
+                    "chat_request_completed",
+                    request_id=request_id,
+                    duration_ms=round(total_duration_ms, 1),
+                    steps=step + 1,
+                    tool_calls=len(execution_trace),
+                    input_tokens=total_tokens["input"],
+                    output_tokens=total_tokens["output"],
+                    thinking_tokens=total_tokens["thinking"],
+                    answer_chars=len(answer_content),
+                )
                 return AgentResponse(
-                    answer=message.get("content", ""),
+                    answer=answer_content,
                     thinking=thinking_data,
                     execution_trace=execution_trace,
                     moe_traces=self._serialize_moe_trace(latest_trace),
@@ -209,6 +246,14 @@ class CreditScopeAgent:
                 result = await self.tool_registry.execute(tool_name, tool_args)
                 tool_duration = (time.time() - tool_started_at) * 1000
                 record_tool_call(tool_name)
+                logger.info(
+                    "tool_call_completed",
+                    request_id=request_id,
+                    step=step,
+                    tool_name=tool_name,
+                    duration_ms=round(tool_duration, 1),
+                    success="error" not in result,
+                )
 
                 execution_trace.append(
                     {
@@ -236,6 +281,17 @@ class CreditScopeAgent:
         if thinking_data:
             self._record_thinking(request_id, thinking_data)
         record_request_tokens(
+            input_tokens=total_tokens["input"],
+            output_tokens=total_tokens["output"],
+            thinking_tokens=total_tokens["thinking"],
+        )
+        total_duration_ms = (time.time() - request_started_at) * 1000
+        logger.warning(
+            "chat_request_max_steps_reached",
+            request_id=request_id,
+            duration_ms=round(total_duration_ms, 1),
+            steps=MAX_STEPS,
+            tool_calls=len(execution_trace),
             input_tokens=total_tokens["input"],
             output_tokens=total_tokens["output"],
             thinking_tokens=total_tokens["thinking"],
@@ -276,18 +332,43 @@ class CreditScopeAgent:
             request_id=request_id,
             phase="thinking" if params.get("chat_template_kwargs", {}).get("enable_thinking", True) else "response",
         )
+        model_started_at = time.time()
+        logger.info(
+            "model_call_started",
+            request_id=request_id,
+            message_count=len(messages),
+            prompt_chars=self._estimate_message_chars(messages),
+            max_tokens=payload["max_tokens"],
+            thinking_enabled=params.get("chat_template_kwargs", {}).get("enable_thinking", True),
+        )
         try:
             with track_inference_latency():
                 resp = await self._client.post(f"{SGLANG_BASE_URL}/v1/chat/completions", json=payload)
             resp.raise_for_status()
             result = resp.json()
+            usage = result.get("usage", {})
+            finish_reason = result.get("choices", [{}])[0].get("finish_reason")
+            logger.info(
+                "model_call_completed",
+                request_id=request_id,
+                duration_ms=round((time.time() - model_started_at) * 1000, 1),
+                status_code=resp.status_code,
+                prompt_tokens=usage.get("prompt_tokens", 0),
+                completion_tokens=usage.get("completion_tokens", 0),
+                finish_reason=finish_reason,
+            )
             trace = collector.end_trace()
             if trace:
                 record_moe_trace(trace)
             return result
         except Exception as exc:
             collector.end_trace()
-            logger.error("model_call_failed", error=str(exc))
+            logger.error(
+                "model_call_failed",
+                request_id=request_id,
+                duration_ms=round((time.time() - model_started_at) * 1000, 1),
+                error=str(exc),
+            )
             return {
                 "choices": [
                     {
@@ -298,6 +379,19 @@ class CreditScopeAgent:
                 ],
                 "usage": {},
             }
+
+    def _estimate_message_chars(self, messages: list[dict]) -> int:
+        total = 0
+        for message in messages:
+            content = message.get("content", "")
+            if isinstance(content, str):
+                total += len(content)
+                continue
+            if isinstance(content, list):
+                for part in content:
+                    if isinstance(part, dict):
+                        total += len(str(part.get("text", "")))
+        return total
 
     def _build_thinking_trace(
         self,

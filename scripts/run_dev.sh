@@ -143,16 +143,25 @@ echo -e "${GREEN}Cleaning existing CreditScope dev processes...${NC}"
 
 while [ "$#" -gt 0 ]; do
 	case "$1" in
-		--inference|--no-inference|--detach|--foreground)
+		--inference|--no-inference|--detach|--foreground|--fast|--stable)
 			START_DEV_ARGS+=("$1")
 			;;
+		--profile)
+			if [ "$#" -lt 2 ]; then
+				echo -e "${RED}--profile requires a value${NC}"
+				echo "Usage: $(basename "$0") [--inference | --no-inference] [--detach | --foreground] [--profile stable|fast]"
+				exit 1
+			fi
+			START_DEV_ARGS+=("$1" "$2")
+			shift
+			;;
 		-h|--help)
-			echo "Usage: $(basename "$0") [--inference | --no-inference] [--detach | --foreground]"
+			echo "Usage: $(basename "$0") [--inference | --no-inference] [--detach | --foreground] [--profile stable|fast]"
 			exit 0
 			;;
 		*)
 			echo -e "${RED}Unknown option: $1${NC}"
-			echo "Usage: $(basename "$0") [--inference | --no-inference] [--detach | --foreground]"
+			echo "Usage: $(basename "$0") [--inference | --no-inference] [--detach | --foreground] [--profile stable|fast]"
 			exit 1
 			;;
 	esac

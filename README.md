@@ -60,6 +60,9 @@ cp .env.example .env
 # Start development servers
 ./scripts/start-dev.sh
 
+# Start development servers with the lower-latency preset
+./scripts/start-dev.sh --profile fast
+
 # Start development servers in the foreground
 ./scripts/start-dev.sh --foreground
 
@@ -68,6 +71,9 @@ cp .env.example .env
 
 # Clean old processes, then start full dev stack
 ./scripts/run_dev.sh
+
+# Clean old processes, then start with the lower-latency preset
+./scripts/run_dev.sh --profile fast
 
 # Clean old processes, then start the stack in the foreground
 ./scripts/run_dev.sh --foreground
@@ -182,6 +188,7 @@ Key variables:
 - `TP_SIZE` - Tensor parallelism (GPUs)
 - `CONTEXT_LENGTH` - Max context window
 - `DEFAULT_THINKING_BUDGET` - Default CoT budget
+- `INFERENCE_PROFILE` - Startup preset (`stable` or `fast`)
 
 ## Development
 

@@ -12,6 +12,7 @@ from __future__ import annotations
 import structlog
 
 from inference.config import (
+    DEFAULT_THINKING_BUDGET,
     THINKING_BUDGET_PRESETS,
     SAMPLING_THINKING_ON,
     SAMPLING_THINKING_OFF,
@@ -31,7 +32,7 @@ class CoTController:
 
     def __init__(self):
         self.default_mode = "on"
-        self.default_budget = "standard"
+        self.default_budget = DEFAULT_THINKING_BUDGET
         self.default_visibility = "collapsed"
 
     def build_request_params(self, cot_config: dict) -> dict:

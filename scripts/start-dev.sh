@@ -22,9 +22,11 @@ INFERENCE_PORT=${SGLANG_PORT:-8000}
 BACKEND_PORT=${BACKEND_PORT:-8080}
 FRONTEND_PORT=${FRONTEND_PORT:-3000}
 START_INFERENCE=${START_INFERENCE:-true}
+INFERENCE_PROFILE=${INFERENCE_PROFILE:-stable}
 DETACH_MODE=true
 STATUS_ONLY=false
 STOP_ONLY=false
+PROFILE_EXPLICIT=false
 
 # Colors
 RED='\033[0;31m'
@@ -36,7 +38,7 @@ PIDS=()
 SHUTTING_DOWN=0
 
 usage() {
-    echo "Usage: $(basename "$0") [--inference | --no-inference] [--detach | --foreground] [--status] [--stop]"
+    echo "Usage: $(basename "$0") [--inference | --no-inference] [--detach | --foreground] [--status] [--stop] [--profile stable|fast]"
 }
 
 mkdir -p "$PID_DIR" "$LOG_DIR"
@@ -201,6 +203,46 @@ wait_for_http() {
     done
 }
 
+apply_inference_profile() {
+    local stable_args_default="--max-mamba-cache-size 16 --disable-cuda-graph --chunked-prefill-size 512 --max-running-requests 2 --max-total-tokens 65536 --attention-backend triton --skip-server-warmup --fp8-gemm-backend triton"
+    local fast_args_default="$stable_args_default"
+    local use_profile_overrides=false
+
+    case "$INFERENCE_PROFILE" in
+        stable|fast)
+            ;;
+        *)
+            echo -e "${RED}Unknown inference profile: $INFERENCE_PROFILE${NC}"
+            echo "Supported profiles: stable, fast"
+            exit 1
+            ;;
+    esac
+
+    if [ "$PROFILE_EXPLICIT" = "true" ]; then
+        use_profile_overrides=true
+    fi
+
+    if [ "$INFERENCE_PROFILE" = "stable" ]; then
+        if [ -n "${SGLANG_EXTRA_ARGS_STABLE:-}" ] || [ -n "${CHAT_MAX_TOKENS_STABLE:-}" ] || [ -n "${DEFAULT_THINKING_BUDGET_STABLE:-}" ]; then
+            use_profile_overrides=true
+        fi
+        if [ "$use_profile_overrides" = "true" ]; then
+            export SGLANG_EXTRA_ARGS="${SGLANG_EXTRA_ARGS_STABLE:-${SGLANG_EXTRA_ARGS:-$stable_args_default}}"
+            export CHAT_MAX_TOKENS="${CHAT_MAX_TOKENS_STABLE:-${CHAT_MAX_TOKENS:-512}}"
+            export DEFAULT_THINKING_BUDGET="${DEFAULT_THINKING_BUDGET_STABLE:-${DEFAULT_THINKING_BUDGET:-standard}}"
+        fi
+    else
+        if [ -n "${SGLANG_EXTRA_ARGS_FAST:-}" ] || [ -n "${CHAT_MAX_TOKENS_FAST:-}" ] || [ -n "${DEFAULT_THINKING_BUDGET_FAST:-}" ]; then
+            use_profile_overrides=true
+        fi
+        if [ "$use_profile_overrides" = "true" ]; then
+            export SGLANG_EXTRA_ARGS="${SGLANG_EXTRA_ARGS_FAST:-${SGLANG_EXTRA_ARGS:-$fast_args_default}}"
+            export CHAT_MAX_TOKENS="${CHAT_MAX_TOKENS_FAST:-${CHAT_MAX_TOKENS:-256}}"
+            export DEFAULT_THINKING_BUDGET="${DEFAULT_THINKING_BUDGET_FAST:-${DEFAULT_THINKING_BUDGET:-short}}"
+        fi
+    fi
+}
+
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --inference)
@@ -214,6 +256,24 @@ while [ "$#" -gt 0 ]; do
             ;;
         --foreground)
             DETACH_MODE=false
+            ;;
+        --profile)
+            if [ "$#" -lt 2 ]; then
+                echo -e "${RED}--profile requires a value${NC}"
+                usage
+                exit 1
+            fi
+            INFERENCE_PROFILE="$2"
+            PROFILE_EXPLICIT=true
+            shift
+            ;;
+        --fast)
+            INFERENCE_PROFILE="fast"
+            PROFILE_EXPLICIT=true
+            ;;
+        --stable)
+            INFERENCE_PROFILE="stable"
+            PROFILE_EXPLICIT=true
             ;;
         --status)
             STATUS_ONLY=true
@@ -254,6 +314,8 @@ if [ "$STOP_ONLY" = "true" ]; then
     exit 0
 fi
 
+apply_inference_profile
+
 cleanup() {
     if [ "$SHUTTING_DOWN" -eq 1 ]; then
         return 0
@@ -290,6 +352,7 @@ done
 
 echo -e "${GREEN}Starting CreditScope Development Servers${NC}"
 echo ""
+echo -e "  ${GREEN}Inference profile:${NC} ${YELLOW}$INFERENCE_PROFILE${NC}"
 
 # Activate virtual environment
 VENV_ACTIVATE="$PROJECT_ROOT/.venv/bin/activate"
