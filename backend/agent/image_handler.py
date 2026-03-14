@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import base64
 import io
+import os
 import re
 
 import structlog
@@ -31,6 +32,7 @@ class ImageHandler:
         "bank statement", "account summary",
         "deed", "property", "title",
     ]
+    MULTIMODAL_ENABLED = os.getenv("ENABLE_MULTIMODAL_IMAGE_INPUT", "false").lower() == "true"
 
     async def process_images(
         self, images: list[bytes], context: str = ""
@@ -48,22 +50,19 @@ class ImageHandler:
         processed = []
         for img_bytes in images:
             try:
-                if self._looks_like_document(img_bytes, context):
-                    result = self._ocr_extract(img_bytes, context)
-                    processed.append(result)
+                ocr_result = self._ocr_extract(img_bytes, context)
+                if self._should_use_ocr(ocr_result, img_bytes, context):
+                    processed.append(ocr_result)
+                elif self.MULTIMODAL_ENABLED:
+                    processed.append(self._as_image_url(img_bytes))
                 else:
-                    b64 = base64.b64encode(img_bytes).decode()
-                    processed.append({
-                        "type": "image_url",
-                        "image_url": {"url": f"data:image/jpeg;base64,{b64}"},
-                    })
+                    processed.append(self._multimodal_disabled_result(ocr_result))
             except Exception as e:
                 logger.error("image_processing_failed", error=str(e))
-                b64 = base64.b64encode(img_bytes).decode()
-                processed.append({
-                    "type": "image_url",
-                    "image_url": {"url": f"data:image/jpeg;base64,{b64}"},
-                })
+                if self.MULTIMODAL_ENABLED:
+                    processed.append(self._as_image_url(img_bytes))
+                else:
+                    processed.append(self._multimodal_disabled_result())
 
         return processed
 
@@ -75,11 +74,45 @@ class ImageHandler:
             "w-2", "1040", "deed", "document", "upload",
             "scan", "statement",
         ]
-        return any(kw in context_lower for kw in doc_keywords)
+        return any(kw in context_lower for kw in doc_keywords) or img_bytes.startswith(b"%PDF-")
+
+    def _should_use_ocr(self, ocr_result: dict, img_bytes: bytes, context: str) -> bool:
+        if self._looks_like_document(img_bytes, context):
+            return True
+
+        raw_text = (ocr_result.get("raw_text") or "").strip()
+        if len(raw_text) >= 24:
+            return True
+
+        extracted = ocr_result.get("data") or {}
+        meaningful_keys = {key for key, value in extracted.items() if value and key not in {"document_type", "raw_text_preview", "extracted_text"}}
+        return bool(meaningful_keys)
+
+    def _multimodal_disabled_result(self, ocr_result: dict | None = None) -> dict:
+        if ocr_result and (ocr_result.get("raw_text") or "").strip():
+            return ocr_result
+
+        return {
+            "type": "extracted_data",
+            "data": {
+                "document_type": "unknown",
+                "ocr_status": "no_text_detected",
+                "guidance": "No readable text was extracted from the upload. Ask the user for a clearer image or a higher-resolution document if analysis is required.",
+            },
+        }
 
     def _ocr_extract(self, img_bytes: bytes, context: str) -> dict:
         """Extract text from a document image via OCR."""
         try:
+            if img_bytes.startswith(b"%PDF-"):
+                text = self._extract_pdf_text(img_bytes)
+                structured = self._parse_document(text, context)
+                return {
+                    "type": "extracted_data",
+                    "data": structured,
+                    "raw_text": text,
+                }
+
             from PIL import Image
             import pytesseract
 
@@ -94,11 +127,44 @@ class ImageHandler:
             }
         except ImportError:
             logger.warning("ocr_dependencies_unavailable")
-            b64 = base64.b64encode(img_bytes).decode()
-            return {
-                "type": "image_url",
-                "image_url": {"url": f"data:image/jpeg;base64,{b64}"},
-            }
+            return self._as_image_url(img_bytes)
+
+    def _extract_pdf_text(self, pdf_bytes: bytes) -> str:
+        try:
+            from pypdf import PdfReader
+
+            reader = PdfReader(io.BytesIO(pdf_bytes))
+            pages = []
+            for page in reader.pages[:10]:
+                page_text = (page.extract_text() or "").strip()
+                if page_text:
+                    pages.append(page_text)
+            return "\n\n".join(pages)
+        except ImportError:
+            logger.warning("pdf_text_dependencies_unavailable")
+            return ""
+        except Exception as exc:
+            logger.warning("pdf_text_extraction_failed", error=str(exc))
+            return ""
+
+    def _as_image_url(self, img_bytes: bytes) -> dict:
+        mime_type = self._detect_mime_type(img_bytes)
+        b64 = base64.b64encode(img_bytes).decode()
+        return {
+            "type": "image_url",
+            "image_url": {"url": f"data:{mime_type};base64,{b64}"},
+        }
+
+    def _detect_mime_type(self, img_bytes: bytes) -> str:
+        if img_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
+            return "image/png"
+        if img_bytes.startswith(b"\xff\xd8\xff"):
+            return "image/jpeg"
+        if img_bytes.startswith((b"II*\x00", b"MM\x00*")):
+            return "image/tiff"
+        if img_bytes.startswith(b"%PDF-"):
+            return "application/pdf"
+        return "image/jpeg"
 
     def _parse_document(self, text: str, context: str) -> dict:
         """Parse OCR text into structured fields based on document type."""

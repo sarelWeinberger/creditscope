@@ -36,6 +36,7 @@ dependencies = [
 backend = [
     "Pillow>=10.4.0",
     "pytesseract>=0.3.13",
+    "pypdf>=6.0.0",
     "python-multipart>=0.0.12",
 ]
 inference = [

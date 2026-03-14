@@ -78,6 +78,9 @@ cp .env.example .env
 # Clean old processes, then start the stack in the foreground
 ./scripts/run_dev.sh --foreground
 
+# Run a one-shot watchdog check that restarts the stack if backend or inference is hung
+./scripts/watchdog.sh
+
 # Check or stop detached dev services
 ./scripts/start-dev.sh --status
 ./scripts/start-dev.sh --stop
@@ -98,6 +101,27 @@ docker-compose logs -f
 # Stop services
 docker-compose down
 ```
+
+### Production Hardening
+
+If you are running the app with the repo scripts instead of Docker, add a watchdog so the stack restarts automatically when the model stops responding:
+
+```bash
+* * * * * cd /home/ubuntu/creditscope && ./scripts/watchdog.sh
+```
+
+Useful watchdog environment variables:
+
+- `WATCHDOG_BACKEND_URL` defaults to `http://127.0.0.1:8080/health`
+- `WATCHDOG_INFERENCE_URL` defaults to `http://127.0.0.1:8000/model_info`
+- `WATCHDOG_RESTART_COOLDOWN_SECONDS` defaults to `120`
+
+If you are using Docker in production, the compose file now includes:
+
+- `restart: unless-stopped` for `inference`, `backend`, and `frontend`
+- inference health checks against `/model_info` instead of only `/health`
+
+For the most robust production setup, run the app behind a process supervisor such as `systemd` or Docker with health checks and automatic restarts.
 
 ## Services
 

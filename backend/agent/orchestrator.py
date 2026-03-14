@@ -116,6 +116,33 @@ class CreditScopeAgent:
         self.system_prompt = SYSTEM_PROMPT.format(tool_descriptions=json.dumps(TOOLS, indent=2))
         self._client = httpx.AsyncClient(timeout=300.0)
 
+    def _build_image_query(self, query: str) -> str:
+        normalized = query.strip()
+        generic_requests = {
+            "analyze",
+            "analyse",
+            "analys",
+            "check",
+            "look",
+            "read",
+            "scan",
+            "what is this",
+            "what do you see",
+        }
+        if not normalized or normalized.lower() in generic_requests or len(normalized) < 10:
+            return (
+                "Analyze the uploaded image or document. Summarize what it contains, "
+                "extract any important amounts, dates, names, or identifiers, and explain "
+                "any credit-relevant information. If OCR text is incomplete or uncertain, say "
+                "what is unclear instead of discussing internal system limitations."
+            )
+
+        return (
+            f"{normalized}\n\n"
+            "Use the uploaded image or extracted document data as primary evidence. "
+            "Summarize key fields and call out any uncertainty from OCR gaps."
+        )
+
     async def process_query(
         self,
         query: str,
@@ -151,8 +178,9 @@ class CreditScopeAgent:
 
         messages = [{"role": "system", "content": self.system_prompt}]
         if images:
+            image_query = self._build_image_query(query)
             image_data = await self.image_handler.process_images(images, context=query)
-            content_parts: list[dict] = [{"type": "text", "text": query}]
+            content_parts: list[dict] = [{"type": "text", "text": image_query}]
             for img in image_data:
                 if img["type"] == "image_url":
                     content_parts.append({"type": "image_url", "image_url": img["image_url"]})

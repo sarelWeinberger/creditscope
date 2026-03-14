@@ -28,6 +28,30 @@ interface UseChatReturn {
   activeToolCalls: ExecutionStep[];
 }
 
+async function fileToBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = reader.result;
+      if (typeof result !== "string") {
+        reject(new Error(`Failed to read ${file.name}`));
+        return;
+      }
+      const commaIndex = result.indexOf(",");
+      resolve(commaIndex >= 0 ? result.slice(commaIndex + 1) : result);
+    };
+    reader.onerror = () => reject(new Error(`Failed to read ${file.name}`));
+    reader.readAsDataURL(file);
+  });
+}
+
+async function encodeImages(images?: File[]): Promise<string[] | undefined> {
+  if (!images?.length) {
+    return undefined;
+  }
+  return Promise.all(images.map(fileToBase64));
+}
+
 export function useChat(initialSessionId?: string): UseChatReturn {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [isConnected, setIsConnected] = useState(false);
@@ -89,7 +113,7 @@ export function useChat(initialSessionId?: string): UseChatReturn {
   }, [appendErrorMessage]);
 
   const sendViaRest = useCallback(
-    async (text: string, cotConfig?: CoTConfig) => {
+    async (text: string, images?: File[], cotConfig?: CoTConfig) => {
       setIsStreaming(true);
 
       const responseId = uuidv4();
@@ -106,6 +130,7 @@ export function useChat(initialSessionId?: string): UseChatReturn {
       ]);
 
       try {
+        const encodedImages = await encodeImages(images);
         const response = await fetch(`${API_BASE}/chat`, {
           method: "POST",
           headers: {
@@ -114,6 +139,7 @@ export function useChat(initialSessionId?: string): UseChatReturn {
           credentials: "include",
           body: JSON.stringify({
             message: text,
+            images: encodedImages,
             session_id: sessionId,
             cot_config: cotConfig,
           }),
@@ -369,27 +395,40 @@ export function useChat(initialSessionId?: string): UseChatReturn {
       setMessages((prev) => [...prev, userMsg]);
 
       if (!isConnected || !wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
-        void sendViaRest(text, cotConfig);
+        void sendViaRest(text, images, cotConfig);
         return;
       }
 
-      const payload = {
-        type: "message",
-        content: text,
-        session_id: sessionId,
-        cot_config: cotConfig
-          ? {
-              mode: cotConfig.mode,
-              budget: cotConfig.budget,
-              visibility: cotConfig.visibility,
-              enable_thinking: cotConfig.enable_thinking,
-            }
-          : { mode: "on", budget: "standard", visibility: "collapsed", enable_thinking: true },
-      };
+      void (async () => {
+        try {
+          const encodedImages = await encodeImages(images);
+          const payload = {
+            type: "message",
+            content: text,
+            images: encodedImages,
+            session_id: sessionId,
+            cot_config: cotConfig
+              ? {
+                  mode: cotConfig.mode,
+                  budget: cotConfig.budget,
+                  visibility: cotConfig.visibility,
+                  enable_thinking: cotConfig.enable_thinking,
+                }
+              : { mode: "on", budget: "standard", visibility: "collapsed", enable_thinking: true },
+          };
 
-      wsRef.current.send(JSON.stringify(payload));
+          if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
+            await sendViaRest(text, images, cotConfig);
+            return;
+          }
+
+          wsRef.current.send(JSON.stringify(payload));
+        } catch (error) {
+          appendErrorMessage(error instanceof Error ? error.message : "Image upload failed");
+        }
+      })();
     },
-    [isConnected, isStreaming, sendViaRest, sessionId]
+    [appendErrorMessage, isConnected, isStreaming, sendViaRest, sessionId]
   );
 
   const clearMessages = useCallback(() => {

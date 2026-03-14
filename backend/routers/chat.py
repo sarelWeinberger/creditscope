@@ -204,5 +204,5 @@ async def chat_websocket(websocket: WebSocket):
                 "auto_budget": result.auto_budget,
             })
 
-    except WebSocketDisconnect:
+    except (WebSocketDisconnect, RuntimeError):
         pass
