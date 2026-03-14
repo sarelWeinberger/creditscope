@@ -1,5 +1,5 @@
 import React, { useRef, useEffect, useState, useCallback } from "react";
-import { CoTConfig, ThinkingMode, ThinkingVisibility, Customer } from "../types";
+import { CoTConfig, ConversationSummary, ThinkingMode, ThinkingVisibility, Customer } from "../types";
 import { useChat } from "../hooks/useChat";
 import MessageBubble from "./MessageBubble";
 import ThinkingBudgetSlider from "./ThinkingBudgetSlider";
@@ -7,6 +7,7 @@ import ToolExecutionPanel from "./ToolExecutionPanel";
 import MoEExpertPanel from "./MoEExpertPanel";
 import ImageUpload from "./ImageUpload";
 import CustomerCard from "./CustomerCard";
+import { listConversations, deleteConversation } from "../services/historyApi";
 
 interface ChatInterfaceProps {
   selectedCustomer?: Customer | null;
@@ -20,14 +21,48 @@ const DEFAULT_COT: CoTConfig = {
 };
 
 export default function ChatInterface({ selectedCustomer }: ChatInterfaceProps) {
-  const { messages, isConnected, isStreaming, sessionId, sendMessage, clearMessages } =
-    useChat();
+  const {
+    messages, isConnected, isStreaming, sessionId, conversationId,
+    sendMessage, clearMessages, loadConversation, startNewConversation,
+  } = useChat();
 
   const [cotConfig, setCotConfig] = useState<CoTConfig>(DEFAULT_COT);
   const [input, setInput] = useState("");
   const [pendingImages, setPendingImages] = useState<File[]>([]);
   const [showToolPanel, setShowToolPanel] = useState(false);
   const [showMoEPanel, setShowMoEPanel] = useState(false);
+  const [showHistory, setShowHistory] = useState(false);
+  const [conversations, setConversations] = useState<ConversationSummary[]>([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
+
+  const refreshHistory = useCallback(async () => {
+    setHistoryLoading(true);
+    try {
+      const list = await listConversations();
+      setConversations(list);
+    } finally {
+      setHistoryLoading(false);
+    }
+  }, []);
+
+  // Refresh history list when panel opens or when conversation saves (streaming ends)
+  useEffect(() => {
+    if (showHistory) {
+      void refreshHistory();
+    }
+  }, [showHistory, isStreaming, refreshHistory]);
+
+  const handleLoadConversation = useCallback(async (id: string) => {
+    await loadConversation(id);
+  }, [loadConversation]);
+
+  const handleDeleteConversation = useCallback(async (id: string) => {
+    await deleteConversation(id);
+    void refreshHistory();
+    if (id === conversationId) {
+      startNewConversation();
+    }
+  }, [conversationId, refreshHistory, startNewConversation]);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -76,6 +111,66 @@ export default function ChatInterface({ selectedCustomer }: ChatInterfaceProps) 
         </div>
       )}
 
+      {/* History sidebar */}
+      {showHistory && (
+        <div className="w-72 flex-shrink-0 border-r border-gray-800 overflow-y-auto bg-gray-900 flex flex-col">
+          <div className="px-4 py-3 border-b border-gray-800 flex items-center justify-between">
+            <h3 className="text-sm font-semibold text-white">Conversation History</h3>
+            <button
+              onClick={() => setShowHistory(false)}
+              className="text-gray-500 hover:text-gray-300"
+            >
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </button>
+          </div>
+          <div className="flex-1 overflow-y-auto">
+            {historyLoading ? (
+              <div className="p-4 text-center text-gray-500 text-sm">Loading...</div>
+            ) : conversations.length === 0 ? (
+              <div className="p-4 text-center text-gray-500 text-sm">No saved conversations yet.</div>
+            ) : (
+              <div className="divide-y divide-gray-800">
+                {conversations.map((conv) => (
+                  <div
+                    key={conv.id}
+                    className={`px-4 py-3 cursor-pointer hover:bg-gray-800 transition-colors group ${
+                      conv.id === conversationId ? "bg-gray-800 border-l-2 border-blue-500" : ""
+                    }`}
+                    onClick={() => void handleLoadConversation(conv.id)}
+                  >
+                    <p className="text-sm text-gray-200 truncate">{conv.title}</p>
+                    <div className="flex items-center justify-between mt-1">
+                      <span className="text-xs text-gray-500">
+                        {conv.message_count} messages
+                      </span>
+                      <div className="flex items-center gap-1">
+                        <span className="text-xs text-gray-600">
+                          {new Date(conv.updated_at).toLocaleDateString()}
+                        </span>
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            void handleDeleteConversation(conv.id);
+                          }}
+                          className="opacity-0 group-hover:opacity-100 text-gray-500 hover:text-red-400 transition-all ml-1"
+                          title="Delete conversation"
+                        >
+                          <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                          </svg>
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
       {/* Center: Chat area */}
       <div className="flex-1 flex flex-col min-w-0">
         {/* Header */}
@@ -92,6 +187,16 @@ export default function ChatInterface({ selectedCustomer }: ChatInterfaceProps) 
             </span>
           </div>
           <div className="flex items-center gap-2">
+            <button
+              onClick={() => setShowHistory((v) => !v)}
+              className={`px-3 py-1 text-xs rounded-md border transition-colors ${
+                showHistory
+                  ? "bg-green-600 border-green-500 text-white"
+                  : "border-gray-700 text-gray-400 hover:text-white"
+              }`}
+            >
+              History
+            </button>
             <button
               onClick={() => setShowToolPanel((v) => !v)}
               className={`px-3 py-1 text-xs rounded-md border transition-colors ${
@@ -111,6 +216,12 @@ export default function ChatInterface({ selectedCustomer }: ChatInterfaceProps) 
               }`}
             >
               MoE
+            </button>
+            <button
+              onClick={startNewConversation}
+              className="px-3 py-1 text-xs rounded-md border border-gray-700 text-gray-400 hover:text-white transition-colors"
+            >
+              New Chat
             </button>
             <button
               onClick={clearMessages}

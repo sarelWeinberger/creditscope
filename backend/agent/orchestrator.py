@@ -133,14 +133,13 @@ class CreditScopeAgent:
             return (
                 "Analyze the uploaded image or document. Summarize what it contains, "
                 "extract any important amounts, dates, names, or identifiers, and explain "
-                "any credit-relevant information. If OCR text is incomplete or uncertain, say "
-                "what is unclear instead of discussing internal system limitations."
+                "any credit-relevant information."
             )
 
         return (
             f"{normalized}\n\n"
-            "Use the uploaded image or extracted document data as primary evidence. "
-            "Summarize key fields and call out any uncertainty from OCR gaps."
+            "Use the uploaded image as primary evidence. "
+            "Summarize key fields and any credit-relevant information visible."
         )
 
     async def process_query(
@@ -184,12 +183,10 @@ class CreditScopeAgent:
             for img in image_data:
                 if img["type"] == "image_url":
                     content_parts.append({"type": "image_url", "image_url": img["image_url"]})
-                elif img["type"] == "extracted_data":
+                else:
+                    # Fallback for encoding errors – pass any guidance as text
                     content_parts.append(
-                        {
-                            "type": "text",
-                            "text": f"\n[Extracted document data: {json.dumps(img['data'])}]",
-                        }
+                        {"type": "text", "text": f"\n[Image note: {json.dumps(img.get('data', {}))}]"}
                     )
             messages.append({"role": "user", "content": content_parts})
         else:

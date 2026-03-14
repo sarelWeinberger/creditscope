@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { v4 as uuidv4 } from "uuid";
 import {
   ChatMessage,
+  ConversationDetail,
   CoTConfig,
   ExecutionStep,
   MoERequestTrace,
@@ -9,6 +10,7 @@ import {
   ThinkingVisibility,
   WebSocketEvent,
 } from "../types";
+import { saveConversation, getConversation } from "../services/historyApi";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 const WS_URL =
@@ -22,9 +24,12 @@ interface UseChatReturn {
   isConnected: boolean;
   isStreaming: boolean;
   sessionId: string;
+  conversationId: string;
   sendMessage: (text: string, images?: File[], cotConfig?: CoTConfig) => void;
   clearMessages: () => void;
   reconnect: () => void;
+  loadConversation: (id: string) => Promise<void>;
+  startNewConversation: () => void;
   activeToolCalls: ExecutionStep[];
 }
 
@@ -58,6 +63,8 @@ export function useChat(initialSessionId?: string): UseChatReturn {
   const [isStreaming, setIsStreaming] = useState(false);
   const [sessionId] = useState<string>(initialSessionId || uuidv4());
   const [activeToolCalls, setActiveToolCalls] = useState<ExecutionStep[]>([]);
+  const [conversationId, setConversationId] = useState<string>(uuidv4());
+  const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectAttempts = useRef(0);
@@ -434,6 +441,7 @@ export function useChat(initialSessionId?: string): UseChatReturn {
   const clearMessages = useCallback(() => {
     setMessages([]);
     setActiveToolCalls([]);
+    setConversationId(uuidv4());
   }, []);
 
   const reconnect = useCallback(() => {
@@ -463,14 +471,68 @@ export function useChat(initialSessionId?: string): UseChatReturn {
     return () => clearInterval(interval);
   }, []);
 
+  // Auto-save conversation after streaming completes
+  const messagesRef = useRef(messages);
+  messagesRef.current = messages;
+  const conversationIdRef = useRef(conversationId);
+  conversationIdRef.current = conversationId;
+
+  useEffect(() => {
+    if (isStreaming) return;
+    const msgs = messagesRef.current;
+    if (msgs.length === 0) return;
+
+    // Debounce save by 1.5s after streaming ends
+    if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+    saveTimerRef.current = setTimeout(() => {
+      const firstUserMsg = msgs.find((m) => m.role === "user");
+      const title = firstUserMsg
+        ? firstUserMsg.content.slice(0, 80) + (firstUserMsg.content.length > 80 ? "..." : "")
+        : "New conversation";
+      void saveConversation(conversationIdRef.current, title, msgs);
+    }, 1500);
+
+    return () => {
+      if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+    };
+  }, [isStreaming, messages]);
+
+  const loadConversation = useCallback(async (id: string) => {
+    const detail = await getConversation(id);
+    if (!detail) return;
+    setConversationId(detail.id);
+    setMessages(
+      detail.messages.map((m) => ({
+        id: m.id,
+        role: m.role as ChatMessage["role"],
+        content: m.content,
+        thinking: m.thinking || undefined,
+        thinkingTokens: m.thinking_tokens || undefined,
+        thinkingDurationMs: m.thinking_duration_ms || undefined,
+        toolCalls: (m.tool_calls as ExecutionStep[] | null) || undefined,
+        error: m.error || undefined,
+        timestamp: m.timestamp ? new Date(m.timestamp) : new Date(),
+      }))
+    );
+  }, []);
+
+  const startNewConversation = useCallback(() => {
+    setMessages([]);
+    setActiveToolCalls([]);
+    setConversationId(uuidv4());
+  }, []);
+
   return {
     messages,
     isConnected,
     isStreaming,
     sessionId,
+    conversationId,
     sendMessage,
     clearMessages,
     reconnect,
+    loadConversation,
+    startNewConversation,
     activeToolCalls,
   };
 }

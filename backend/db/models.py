@@ -85,6 +85,41 @@ class LoanApplication(Base):
         return f"<LoanApplication(id={self.id}, type='{self.loan_type}', amount={self.requested_amount})>"
 
 
+class Conversation(Base):
+    __tablename__ = "conversations"
+
+    id = Column(String(36), primary_key=True)  # UUID
+    user_email = Column(String(200), nullable=False, index=True)
+    title = Column(String(300), nullable=False, default="New conversation")
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    messages = relationship("Message", back_populates="conversation", cascade="all, delete-orphan", order_by="Message.created_at")
+
+    def __repr__(self):
+        return f"<Conversation(id={self.id}, title='{self.title}')>"
+
+
+class Message(Base):
+    __tablename__ = "messages"
+
+    id = Column(String(36), primary_key=True)  # UUID
+    conversation_id = Column(String(36), ForeignKey("conversations.id"), nullable=False, index=True)
+    role = Column(String(20), nullable=False)  # user, assistant, system
+    content = Column(Text, nullable=False, default="")
+    thinking = Column(Text, nullable=True)
+    thinking_tokens = Column(Integer, nullable=True)
+    thinking_duration_ms = Column(Float, nullable=True)
+    tool_calls = Column(JSON, nullable=True)
+    error = Column(Text, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    conversation = relationship("Conversation", back_populates="messages")
+
+    def __repr__(self):
+        return f"<Message(id={self.id}, role='{self.role}')>"
+
+
 class CustomerDocument(Base):
     __tablename__ = "customer_documents"
 

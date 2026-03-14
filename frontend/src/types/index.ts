@@ -451,3 +451,31 @@ export interface ChatMessage {
   isStreaming?: boolean;
   error?: string;
 }
+
+// ─── Conversation History Types ──────────────────────────────────────────────
+
+export interface ConversationSummary {
+  id: string;
+  title: string;
+  message_count: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ConversationDetail {
+  id: string;
+  title: string;
+  messages: Array<{
+    id: string;
+    role: "user" | "assistant" | "system";
+    content: string;
+    thinking?: string | null;
+    thinking_tokens?: number | null;
+    thinking_duration_ms?: number | null;
+    tool_calls?: ExecutionStep[] | null;
+    error?: string | null;
+    timestamp?: string | null;
+  }>;
+  created_at: string;
+  updated_at: string;
+}

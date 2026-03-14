@@ -12,7 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from backend.auth import require_authenticated_request
 from backend.db.models import init_db
 from backend.db.seed import seed_database
-from backend.routers import auth, chat, customers, observability, thinking
+from backend.routers import auth, chat, customers, history, observability, thinking
 
 structlog.configure(
     processors=[
@@ -88,6 +88,11 @@ app.include_router(
     prefix="/api",
     tags=["thinking"],
     dependencies=[Depends(require_authenticated_request)],
+)
+app.include_router(
+    history.router,
+    prefix="/api",
+    tags=["history"],
 )
 
 
