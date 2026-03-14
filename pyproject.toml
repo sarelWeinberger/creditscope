@@ -39,6 +39,11 @@ backend = [
     "pypdf>=6.0.0",
     "python-multipart>=0.0.12",
 ]
+circuit = [
+    "numpy>=1.26.0",
+    "torch>=2.4.0",
+    "transformers>=4.46.0",
+]
 inference = [
     "torch>=2.4.0",
     "sglang[all]>=0.4.5",
@@ -54,6 +59,7 @@ dev = [
 ]
 all = [
     "creditscope[backend]",
+    "creditscope[circuit]",
     "creditscope[inference]",
     "creditscope[dev]",
 ]
@@ -65,7 +71,7 @@ Repository = "https://github.com/sarelWeinberger/creditscope.git"
 Issues = "https://github.com/sarelWeinberger/creditscope/issues"
 
 [tool.hatch.build.targets.wheel]
-packages = ["backend", "inference"]
+packages = ["backend", "inference", "circuit_tracer"]
 
 [tool.ruff]
 target-version = "py311"
@@ -87,7 +93,7 @@ ignore = [
 ]
 
 [tool.ruff.lint.isort]
-known-first-party = ["backend", "inference"]
+known-first-party = ["backend", "inference", "circuit_tracer"]
 
 [tool.mypy]
 python_version = "3.11"

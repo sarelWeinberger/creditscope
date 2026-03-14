@@ -479,3 +479,49 @@ export interface ConversationDetail {
   created_at: string;
   updated_at: string;
 }
+
+// ─── Circuit Tracer Types ───────────────────────────────────────────────────
+
+export interface CircuitCheckpoint {
+  name: string;
+  path: string;
+  size_mb: number;
+}
+
+export interface CircuitArchitecture {
+  model_name: string;
+  num_layers: number;
+  d_model: number;
+  moe_layers: number[];
+  dense_layers: number[];
+  deltanet_layers: number[];
+  attention_layers: number[];
+  summary: string;
+}
+
+export interface CircuitTraceFeature {
+  layer: number;
+  position: number;
+  feature_idx: number;
+  activation: number;
+  token: string;
+}
+
+export interface CircuitTraceEdge {
+  source: string;
+  target: string;
+  weight: number;
+}
+
+export interface CircuitTraceResponse {
+  prompt: string;
+  target_token: string;
+  target_position: number;
+  num_nodes: number;
+  num_edges: number;
+  num_layers: number;
+  total_attribution: number;
+  top_features: CircuitTraceFeature[];
+  top_edges: CircuitTraceEdge[];
+  graph_json_path?: string | null;
+}

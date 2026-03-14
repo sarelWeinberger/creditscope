@@ -8,6 +8,7 @@ from contextlib import asynccontextmanager
 import structlog
 from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import Response
 
 from backend.auth import require_authenticated_request
 from backend.db.models import init_db
@@ -98,9 +99,22 @@ app.include_router(
 # Circuit tracing (loaded lazily — model only loaded on first request)
 try:
     from circuit_tracer.api import router as circuit_router
-    app.include_router(circuit_router, prefix="/api", tags=["circuit-tracer"])
+    app.include_router(
+        circuit_router,
+        prefix="/api",
+        tags=["circuit-tracer"],
+        dependencies=[Depends(require_authenticated_request)],
+    )
 except ImportError:
     pass  # circuit_tracer deps not installed
+
+
+@app.get("/metrics")
+async def metrics():
+    return Response(
+        content=observability.collect_backend_metrics(),
+        media_type="text/plain; charset=utf-8",
+    )
 
 
 @app.get("/health")

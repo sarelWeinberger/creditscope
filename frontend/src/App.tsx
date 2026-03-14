@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { BrowserRouter, Route, Routes, Link, useLocation } from "react-router-dom";
 import ChatInterface from "./components/ChatInterface";
+import CircuitTracerDashboard from "./components/CircuitTracerDashboard";
 import LoginScreen from "./components/LoginScreen";
 import ObservabilityDash from "./components/ObservabilityDash";
 import { Customer, CoTConfig, ThinkingMode, ThinkingVisibility } from "./types";
@@ -307,6 +308,15 @@ function AppLayout({ currentUser, onLogout }: { currentUser: string; onLogout: (
               </svg>
             }
           />
+          <NavItem
+            to="/circuit"
+            label="Circuit Tracer"
+            icon={
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 3v6m6-6v6m-9 4h12m-9 8v-4m6 4v-4M5 9h14a2 2 0 012 2v2a2 2 0 01-2 2H5a2 2 0 01-2-2v-2a2 2 0 012-2z" />
+              </svg>
+            }
+          />
         </nav>
 
         {/* Selected customer indicator */}
@@ -355,6 +365,14 @@ function AppLayout({ currentUser, onLogout }: { currentUser: string; onLogout: (
             element={
               <div className="h-full overflow-y-auto">
                 <ThinkingPage />
+              </div>
+            }
+          />
+          <Route
+            path="/circuit"
+            element={
+              <div className="h-full overflow-y-auto">
+                <CircuitTracerDashboard />
               </div>
             }
           />

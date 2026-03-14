@@ -21,6 +21,25 @@ PROXY_INFERENCE_OBSERVABILITY = os.getenv(
 ).lower() == "true"
 
 
+def collect_backend_metrics() -> bytes:
+    """Collect backend-local Prometheus metrics, including circuit tracing metrics when available."""
+    parts = [get_metrics().decode("utf-8").strip()]
+
+    try:
+        from prometheus_client import generate_latest
+
+        from circuit_tracer.metrics import REGISTRY as circuit_registry
+
+        circuit_metrics = generate_latest(circuit_registry).decode("utf-8").strip()
+        if circuit_metrics:
+            parts.append(circuit_metrics)
+    except ImportError:
+        pass
+
+    payload = "\n".join(part for part in parts if part).rstrip()
+    return f"{payload}\n".encode("utf-8") if payload else b""
+
+
 def _empty_heatmap(collector) -> dict:
     return {
         "heatmap": {
@@ -217,7 +236,7 @@ async def get_prometheus_metrics():
     if proxied is not None:
         return Response(content=proxied, media_type="text/plain; charset=utf-8")
 
-    metrics = get_metrics()
+    metrics = collect_backend_metrics()
     return Response(content=metrics, media_type="text/plain; charset=utf-8")
 
 

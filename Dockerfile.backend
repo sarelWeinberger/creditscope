@@ -11,10 +11,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Install Python dependencies
 COPY pyproject.toml ./
-RUN pip install --no-cache-dir -e ".[backend]"
+RUN pip install --no-cache-dir -e ".[backend,circuit]"
 
 # Copy application code
 COPY backend/ /app/backend/
+COPY circuit_tracer/ /app/circuit_tracer/
 
 ENV PYTHONPATH=/app
 ENV PYTHONUNBUFFERED=1
