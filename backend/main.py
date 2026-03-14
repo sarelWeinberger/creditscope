@@ -95,6 +95,13 @@ app.include_router(
     tags=["history"],
 )
 
+# Circuit tracing (loaded lazily — model only loaded on first request)
+try:
+    from circuit_tracer.api import router as circuit_router
+    app.include_router(circuit_router, prefix="/api", tags=["circuit-tracer"])
+except ImportError:
+    pass  # circuit_tracer deps not installed
+
 
 @app.get("/health")
 async def health():

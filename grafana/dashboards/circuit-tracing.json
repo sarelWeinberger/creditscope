@@ -1,0 +1,183 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "title": "SAE Reconstruction Loss (per layer)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "lineWidth": 2, "fillOpacity": 10 },
+          "unit": "none"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "right" },
+        "tooltip": { "mode": "multi" }
+      },
+      "targets": [
+        {
+          "expr": "circuit_sae_reconstruction_loss",
+          "legendFormat": "Layer {{layer}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "title": "SAE L0 Sparsity (active features per token)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "lineWidth": 2, "fillOpacity": 10 },
+          "unit": "none"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "right" },
+        "tooltip": { "mode": "multi" }
+      },
+      "targets": [
+        {
+          "expr": "circuit_sae_l0",
+          "legendFormat": "Layer {{layer}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "title": "SAE Training Steps",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 8 },
+      "fieldConfig": {
+        "defaults": { "unit": "none", "thresholds": { "steps": [{ "color": "blue", "value": null }] } },
+        "overrides": []
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "targets": [
+        {
+          "expr": "sum(circuit_sae_training_step_total)",
+          "legendFormat": "Total Steps",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "title": "Circuit Trace Requests",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 8 },
+      "fieldConfig": {
+        "defaults": { "unit": "none", "thresholds": { "steps": [{ "color": "green", "value": null }] } },
+        "overrides": []
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "targets": [
+        {
+          "expr": "circuit_trace_requests_total",
+          "legendFormat": "Traces",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "title": "Trace Duration",
+      "type": "histogram",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "fieldConfig": {
+        "defaults": { "unit": "s" },
+        "overrides": []
+      },
+      "options": { "bucketSize": 5 },
+      "targets": [
+        {
+          "expr": "circuit_trace_duration_seconds_bucket",
+          "legendFormat": "{{le}}s",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "title": "Graph Size: Nodes",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 12 },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "fixed", "fixedColor": "blue" },
+          "custom": { "lineWidth": 2, "fillOpacity": 20 }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.5, circuit_graph_nodes_total_bucket)",
+          "legendFormat": "Median Nodes",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, circuit_graph_nodes_total_bucket)",
+          "legendFormat": "P95 Nodes",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "title": "CLT Reconstruction Loss",
+      "type": "gauge",
+      "gridPos": { "h": 8, "w": 6, "x": 12, "y": 12 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 0.01 },
+              { "color": "red", "value": 0.05 }
+            ]
+          },
+          "max": 0.1
+        },
+        "overrides": []
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "targets": [
+        {
+          "expr": "circuit_clt_reconstruction_loss",
+          "legendFormat": "CLT Loss",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "title": "Steering Experiments",
+      "type": "barchart",
+      "gridPos": { "h": 8, "w": 6, "x": 18, "y": 12 },
+      "fieldConfig": { "defaults": { "unit": "none" }, "overrides": [] },
+      "targets": [
+        {
+          "expr": "sum by (intervention_type) (circuit_steering_requests_total)",
+          "legendFormat": "{{intervention_type}}",
+          "refId": "A"
+        }
+      ]
+    }
+  ],
+  "refresh": "10s",
+  "schemaVersion": 39,
+  "tags": ["circuit-tracing", "interpretability"],
+  "templating": { "list": [] },
+  "time": { "from": "now-1h", "to": "now" },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "Circuit Tracing - Interpretability",
+  "uid": "circuit-tracing-v1"
+}

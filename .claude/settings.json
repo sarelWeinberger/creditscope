@@ -4,7 +4,9 @@
       "Read(//tmp/**)",
       "Bash(netstat -tlnp)",
       "Read(//proc/311979/net/**)",
-      "Read(//home/ubuntu/creditscope/**)"
+      "Read(//home/ubuntu/creditscope/**)",
+      "Bash(python3 -c \":*)",
+      "Bash(python3 -c \"from backend.main import app; print\\(f''Backend OK: {len\\(app.routes\\)} routes''\\)\")"
     ]
   }
 }
