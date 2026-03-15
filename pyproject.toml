@@ -30,6 +30,9 @@ dependencies = [
     "sqlalchemy>=2.0.35",
     "aiosqlite>=0.20.0",
     "prometheus-client>=0.21.0",
+    "python-multipart>=0.0.12",
+    "numpy>=1.26.0",
+    "faker>=20.0.0",
 ]
 
 [project.optional-dependencies]

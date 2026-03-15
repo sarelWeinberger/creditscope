@@ -38,9 +38,10 @@ CreditScope is an AI-powered credit scoring assistant that leverages the Qwen3.5
 ### Prerequisites
 
 - Python 3.11+
-- Node.js 20+
-- NVIDIA GPU with 24GB+ VRAM (for inference)
-- Docker & Docker Compose (optional)
+- Node.js 18+
+- npm 9+
+- NVIDIA GPU with 24GB+ VRAM (for inference; optional for frontend/backend only)
+- Docker & Docker Compose (optional, for containerized deployment)
 
 ### Development Setup
 
@@ -49,52 +50,137 @@ CreditScope is an AI-powered credit scoring assistant that leverages the Qwen3.5
 git clone https://github.com/sarelWeinberger/creditscope.git
 cd creditscope
 
-# Run setup script
+# Run setup (creates venv, installs Python + frontend deps, copies .env)
 chmod +x scripts/setup.sh
 ./scripts/setup.sh
 
-# Configure environment
-cp .env.example .env
 # Edit .env with your settings
+nano .env
 
-# Start development servers
-./scripts/start-dev.sh
-
-# Start development servers with the lower-latency preset
-./scripts/start-dev.sh --profile fast
-
-# Start development servers in the foreground
-./scripts/start-dev.sh --foreground
-
-# Start frontend + backend only
-./scripts/start-dev.sh --no-inference
-
-# Clean old processes, then start full dev stack
+# Start the full dev stack (cleans old processes first)
 ./scripts/run_dev.sh
 
-# Clean old processes, then start with the lower-latency preset
+# Start without the inference server (no GPU required)
+./scripts/run_dev.sh --no-inference
+
+# Start with the lower-latency preset
 ./scripts/run_dev.sh --profile fast
 
-# Clean old processes, then start the stack in the foreground
+# Start in the foreground (logs to terminal)
 ./scripts/run_dev.sh --foreground
-
-# Run a one-shot watchdog check that restarts the stack if backend or inference is hung
-./scripts/watchdog.sh
 
 # Check or stop detached dev services
 ./scripts/start-dev.sh --status
 ./scripts/start-dev.sh --stop
 
-# Put the app on public port 80 using nginx
+# Run a one-shot watchdog check
+./scripts/watchdog.sh
+```
+
+### Expose on Public IP with nginx
+
+After the dev servers are running, serve the app on port 80 using the included nginx setup:
+
+```bash
 ./scripts/setup_nginx_http.sh
+```
+
+This installs nginx (if needed), generates a self-signed SSL certificate, and configures a reverse proxy that routes:
+
+- `/` to the Vite frontend on port 3000
+- `/api/` to the FastAPI backend on port 8080
+- `/api/chat/ws` WebSocket connections to the backend
+
+The app will be available at `http://YOUR_SERVER_IP/`.
+
+To add your server's public IP to the allowed CORS origins, edit `.env`:
+
+```
+CORS_ORIGINS=http://localhost:3000,http://localhost:5173,http://YOUR_SERVER_IP
+```
+
+Then restart the backend:
+
+```bash
+./scripts/start-dev.sh --stop
+./scripts/run_dev.sh --no-inference
+```
+
+### Server Setup From Scratch (Native)
+
+Use this path when provisioning a fresh Ubuntu server without Docker.
+
+#### 1. Host requirements
+
+- Ubuntu 22.04 or 24.04
+- Python 3.11+
+- Node.js 18+ and npm 9+
+- NVIDIA GPU with 24GB+ VRAM (optional, only for inference)
+- Ports `80` and `443` open for public access
+
+#### 2. Install system dependencies
+
+```bash
+sudo apt-get update
+sudo apt-get install -y python3 python3-pip python3-venv git curl nginx openssl lsof
+```
+
+Install Node.js (if not present):
+
+```bash
+curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash -
+sudo apt-get install -y nodejs
+```
+
+#### 3. Clone and configure
+
+```bash
+git clone https://github.com/sarelWeinberger/creditscope.git
+cd creditscope
+cp .env.example .env
+```
+
+Edit `.env` and set at least:
+
+- `AUTH_USERS`, `AUTH_PASSWORD`, and `AUTH_SECRET_KEY` for application login
+- `CORS_ORIGINS` — add your server's public IP (e.g. `http://54.166.246.53`)
+- `HUGGING_FACE_HUB_TOKEN` if the model requires authentication
+- `BASIC_AUTH_USERS` and `BASIC_AUTH_PASSWORD` for frontend basic auth
+
+#### 4. Run setup and start
+
+```bash
+# Install all dependencies (Python venv + npm)
+./scripts/setup.sh
+
+# Start the dev servers (without inference if no GPU)
+./scripts/run_dev.sh --no-inference
+
+# Expose on port 80 via nginx
+./scripts/setup_nginx_http.sh
+```
+
+#### 5. Verify
+
+```bash
+# Check service status
+./scripts/start-dev.sh --status
+
+# Test health
+curl -f http://localhost:8080/health
+curl -f http://localhost:3000/
+
+# Test public access
+curl -f http://YOUR_SERVER_IP/
 ```
 
 ### Docker Deployment
 
+For containerized deployment with GPU inference:
+
 ```bash
-# Create runtime configuration
 cp .env.example .env
-# Edit .env before first start
+# Edit .env with your settings
 
 # Start all services
 docker compose up -d --build
@@ -106,45 +192,18 @@ docker compose logs -f
 docker compose down
 ```
 
-### Server Setup From Scratch
+#### Docker prerequisites
 
-Use this path when provisioning a fresh Ubuntu server for the Docker deployment.
-
-#### 1. Host requirements
-
-- Ubuntu 22.04 or 24.04
-- NVIDIA GPU with 24GB+ VRAM for the full inference stack
-- NVIDIA driver installed and working (`nvidia-smi` must succeed on the host)
-- 40GB+ free disk if the model will be pulled locally
-- Ports `80`, `9090`, and `3001` open if you need external access
-
-If you do not have a compatible GPU, do not use the Docker inference service. Use the repo scripts with `--no-inference`, or point the backend at an external SGLang endpoint.
-
-#### 2. Install Docker
-
-On Ubuntu:
+Install Docker and (if using GPU) the NVIDIA Container Toolkit:
 
 ```bash
+# Docker
 sudo apt-get update
-sudo apt-get install -y ca-certificates curl gnupg
 sudo apt-get install -y docker.io docker-compose-v2
 sudo usermod -aG docker "$USER"
 newgrp docker
-docker --version
-docker compose version
-```
 
-If your host uses `systemd`, start and enable Docker:
-
-```bash
-sudo systemctl enable --now docker
-```
-
-#### 3. Install NVIDIA container support
-
-The `inference` container uses GPU access. Install the NVIDIA Container Toolkit on the host:
-
-```bash
+# NVIDIA Container Toolkit (GPU only)
 curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey \
     | sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
 curl -fsSL https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list \
@@ -153,99 +212,22 @@ curl -fsSL https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-contai
 sudo apt-get update
 sudo apt-get install -y nvidia-container-toolkit
 sudo nvidia-ctk runtime configure --runtime=docker
-```
-
-If your host uses `systemd`, restart Docker after configuring the runtime:
-
-```bash
 sudo systemctl restart docker
 ```
 
-Validate GPU access:
-
-```bash
-nvidia-smi
-docker run --rm --gpus all nvidia/cuda:12.4.0-runtime-ubuntu22.04 nvidia-smi
-```
-
-#### 4. Clone and configure the app
-
-```bash
-git clone https://github.com/sarelWeinberger/creditscope.git
-cd creditscope
-cp .env.example .env
-```
-
-Edit `.env` and set at least these values:
-
-- `HUGGING_FACE_HUB_TOKEN` if the selected model requires authentication
-- `MODEL_PATH` if you are not using the default Qwen model
-- `BASIC_AUTH_USERS` and `BASIC_AUTH_PASSWORD` before exposing the frontend publicly
-- `AUTH_USERS`, `AUTH_PASSWORD`, and `AUTH_SECRET_KEY` for application login
-- `GRAFANA_PASSWORD` for dashboard access
-- `MODEL_CACHE_DIR` if you want model weights stored outside the default home cache
-
-Create the local data directories used by bind mounts:
-
-```bash
-mkdir -p data
-mkdir -p "$HOME/.cache/huggingface"
-```
-
-#### 5. Start the stack
-
-```bash
-docker compose up -d --build
-```
-
-Check status:
-
-```bash
-docker compose ps
-docker compose logs -f inference
-docker compose logs -f backend
-docker compose logs -f frontend
-```
-
-Expected access points after startup:
+#### Docker access points
 
 - Frontend: `http://SERVER_IP/`
 - Prometheus: `http://SERVER_IP:9090/`
 - Grafana: `http://SERVER_IP:3001/`
 
-The backend and inference services are intentionally only exposed inside the Docker network by default.
+#### Common issues
 
-#### 6. Verify health
-
-```bash
-docker compose ps
-curl -I http://127.0.0.1/
-docker compose exec backend curl -f http://localhost:8080/health
-docker compose exec inference curl -f http://localhost:8000/model_info
-```
-
-#### 7. Stop or update the stack
-
-```bash
-# Stop containers but keep volumes
-docker compose down
-
-# Rebuild after code or image changes
-docker compose up -d --build
-
-# Pull newer base images before rebuilding
-docker compose pull
-docker compose up -d --build
-```
-
-#### 8. Common first-boot issues
-
-- `docker: command not found`: Docker is not installed on the host.
-- `could not select device driver` or missing GPU in containers: the NVIDIA Container Toolkit is not configured correctly.
-- `401` or model download failures: set `HUGGING_FACE_HUB_TOKEN` in `.env` if the model is gated.
-- `inference` keeps restarting: the GPU likely does not have enough VRAM for the configured model or `MEM_FRACTION_STATIC` is too high.
-- Frontend prompts for credentials: this is expected when `BASIC_AUTH_USERS` and `BASIC_AUTH_PASSWORD` are set.
-- Port conflicts on `80`, `9090`, or `3001`: stop the conflicting service or change the published ports in [docker-compose.yml](/home/ubuntu/creditscope/docker-compose.yml).
+- `docker: command not found` — Docker is not installed.
+- `could not select device driver` — NVIDIA Container Toolkit not configured.
+- `401` / model download failures — set `HUGGING_FACE_HUB_TOKEN` in `.env`.
+- `inference` keeps restarting — GPU lacks VRAM or `MEM_FRACTION_STATIC` is too high.
+- Port conflicts — stop the conflicting service or change ports in `docker-compose.yml`.
 
 ### Production Hardening
 
